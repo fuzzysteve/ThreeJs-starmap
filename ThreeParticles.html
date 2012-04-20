@@ -1,0 +1,113 @@
+<!DOCTYPE HTML>
+<html lang="en">
+	<head>
+		<title>three.js particle tutorial</title>
+		<meta charset="utf-8">
+
+		<style type="text/css">
+			body {
+				background-color: #000000;
+				margin: 0px;
+				overflow: hidden;
+			}
+		</style>
+		
+	</head>
+	<body>
+		<script src="Three.js"></script>
+
+		<script>
+
+stars=[[107,301,241],[420,0,485],[184,208,0],[348,52,659],[0,187,436],[17,149,349],[172,235,589]];
+target = new THREE.Vector3( 0, 0, 0 );
+arc=0;
+radius=700;
+			// the main three.js components
+			var camera, scene, renderer,
+
+			// to keep track of the mouse position
+				mouseX = 0, mouseY = 0,
+
+			// an array to store our particles in
+				particles = [];
+
+			// let's get going! 
+			init();
+
+			function init() {
+
+				// Camera params : 
+				// field of view, aspect ratio for render output, near and far clipping plane. 
+				camera = new THREE.PerspectiveCamera(80, window.innerWidth / window.innerHeight, 1, 4000 );
+	
+				// move the camera backwards so we can see stuff! 
+				// default position is 0,0,0. 
+				camera.position.z = 700;
+                                camera.lookAt( target );
+				// the scene contains all the 3D object data
+				scene = new THREE.Scene();
+				
+				// camera needs to go in the scene 
+				scene.add(camera);
+	
+				// and the CanvasRenderer figures out what the 
+				// stuff in the scene looks like and draws it!
+	 
+				renderer = new THREE.CanvasRenderer();
+				renderer.setSize( window.innerWidth, window.innerHeight );
+	
+				// the renderer's canvas domElement is added to the body
+				document.body.appendChild( renderer.domElement );
+
+				makeParticles(); 
+			
+				// add the mouse move listener
+				// render 30 times a second (should also look 
+				// at requestAnimationFrame) 
+				setInterval(update,1000/30); 
+			
+			}
+
+			// the main update function, called 30 times a second
+
+			function update() {
+                             arc=(arc>6.28)? 0 : arc+0.01;
+                             arcx=Math.floor(Math.cos(arc)*radius);
+                             arcz=Math.floor(Math.sin(arc)*radius);
+                             camera.position.x=arcx;
+                             camera.position.z=arcz;
+                             camera.lookAt( target );
+                             renderer.render( scene, camera );
+
+			}
+
+			
+			function makeParticles() { 
+				
+				var particle, material; 
+
+				for ( var star in stars ) {
+					material = new THREE.ParticleCanvasMaterial( { color: 0xffffff, program: particleRender } );
+					particle = new THREE.Particle(material);
+					particle.position.x = stars[star][0]-210;
+					particle.position.y = stars[star][1]-210;
+					particle.position.z = stars[star][2]-210;
+					particle.scale.x = particle.scale.y = 10;
+					scene.add( particle );
+					particles.push(particle); 
+				}
+				
+			}
+			
+
+			function particleRender( context ) {
+				
+				context.beginPath();
+				context.arc( 0, 0, 1, 0,  Math.PI * 2, true );
+				context.fill();
+			};
+
+			
+		</script>
+	</body>
+</html>
