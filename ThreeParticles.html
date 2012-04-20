@@ -14,6 +14,7 @@
         
     </head>
     <body>
+<div style="position:absolute;display:block;color:white">Click, hold and drag to rotate. right click to restart rotation. hover on a 'star' to see the name. mousewhere to zoom during rotation (as I'm still more than a little shaky on the camera positioning math)</div>
         <script src="Three.js"></script>
 
         <script>
@@ -23,7 +24,7 @@ target = new THREE.Vector3( 0, 0, 0 );
 arc=0;
 radius=700;
 var isMouseDown = false, onMouseDownPosition, theta = 45, onMouseDownTheta = 45, phi = 60, onMouseDownPhi = 60,    isShiftDown = false;
-var rotate=false;
+var rotate=true;
 var mouse = { x: 0, y: 0 }, INTERSECTED,position= { x: 0, y: 0 };
 
 
@@ -67,7 +68,7 @@ var mouse = { x: 0, y: 0 }, INTERSECTED,position= { x: 0, y: 0 };
                 // render 30 times a second (should also look 
                 // at requestAnimationFrame) 
                 setInterval(update,1000/30); 
-            
+                renderer.domElement.oncontextmenu= function(){ return false;} 
             }
 
             // the main update function, called 30 times a second
@@ -112,14 +113,12 @@ var mouse = { x: 0, y: 0 }, INTERSECTED,position= { x: 0, y: 0 };
             function makeParticles() { 
                 
                 var particle, material; 
-
+                var geometry = new THREE.SphereGeometry( 10,16,16);
                 for ( var star in stars ) {
-                    material = new THREE.ParticleCanvasMaterial( { color: 0xffffff, program: particleRender } );
-                    particle = new THREE.Particle(material);
+                    var particle = new THREE.Mesh( geometry, new THREE.MeshLambertMaterial( { color: Math.random() * 0xffffff } ) );
                     particle.position.x = stars[star][0]-210;
                     particle.position.y = stars[star][1]-210;
                     particle.position.z = stars[star][2]-210;
-                    particle.scale.x = particle.scale.y = 10;
                     particle.name=stars[star][3];
                     scene.add( particle );
                     particles.push(particle); 
@@ -139,10 +138,15 @@ var mouse = { x: 0, y: 0 }, INTERSECTED,position= { x: 0, y: 0 };
             function onDocumentMouseUp( event ) {
 
                 event.preventDefault();
-
+  
                 isMouseDown = false;
                 onMouseDownPosition.x = event.clientX - onMouseDownPosition.x;
                 onMouseDownPosition.y = event.clientY - onMouseDownPosition.y;
+
+if (event.which==3)
+{
+rotate=true;
+}
 
                 if ( onMouseDownPosition.length() > 5 ) {
 
