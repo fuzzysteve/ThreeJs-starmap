@@ -18,19 +18,16 @@
 
         <script>
 
-stars=[[107,301,241,'a'],[420,0,485,'b'],[184,208,0,'c'],[348,52,659,'d'],[0,187,436,'e'],[17,149,349,'f'],[172,235,589,'g']];
+stars=[[107,301,241,'Urlen'],[420,0,485,'Maurasi'],[184,208,0,'Kisogo'],[348,52,659,'Jita'],[0,187,436,'Niyabainen'],[17,149,349,'Perimeter'],[172,235,589,'New Caldari']];
 target = new THREE.Vector3( 0, 0, 0 );
 arc=0;
 radius=700;
-var mouse3D, isMouseDown = false, onMouseDownPosition, theta = 45, onMouseDownTheta = 45, phi = 60, onMouseDownPhi = 60,    isShiftDown = false;
+var isMouseDown = false, onMouseDownPosition, theta = 45, onMouseDownTheta = 45, phi = 60, onMouseDownPhi = 60,    isShiftDown = false;
+var rotate=false;
+var mouse = { x: 0, y: 0 }, INTERSECTED,position= { x: 0, y: 0 };
 
 
-
-            var camera, scene, renderer,
-
-            mouseX = 0, mouseY = 0,
-
-            particles = [];
+            var camera, scene, renderer,projector, particles = [];
 
             // let's get going! 
             init();
@@ -58,7 +55,7 @@ var mouse3D, isMouseDown = false, onMouseDownPosition, theta = 45, onMouseDownTh
     
                 // the renderer's canvas domElement is added to the body
                 document.body.appendChild( renderer.domElement );
-
+                projector = new THREE.Projector();
                 makeParticles(); 
                 document.addEventListener( 'mousemove', onDocumentMouseMove, false );
                 document.addEventListener( 'mousedown', onDocumentMouseDown, false );
@@ -77,17 +74,37 @@ var mouse3D, isMouseDown = false, onMouseDownPosition, theta = 45, onMouseDownTh
 
             function update() {
                         
-                             if (!isMouseDown)
-                             { 
-                                 arc=(arc>6.28)? 0 : arc+0.01;
-                                 arcx=Math.floor(Math.cos(arc)*radius);
-                                 arcz=Math.floor(Math.sin(arc)*radius);
-                                 camera.position.x=arcx;
-                                 camera.position.z=arcz;
-                             }                       
 
-                             camera.lookAt( target );
-                             renderer.render( scene, camera );
+                var vector = new THREE.Vector3( mouse.x, mouse.y, 1 );
+                projector.unprojectVector( vector, camera );
+                var ray = new THREE.Ray( camera.position, vector.subSelf( camera.position ).normalize() );
+
+                var intersects = ray.intersectObjects( scene.children );
+
+                if ( intersects.length > 0 ) {
+                        if ( INTERSECTED != intersects[ 0 ].object ) {
+                             INTERSECTED = intersects[ 0 ].object;
+                          document.getElementById("test").style.left=(position.x+30)+"px"; 
+                          document.getElementById("test").style.top=(position.y-5)+"px";
+                          document.getElementById("test").innerHTML=INTERSECTED.name;
+                        document.getElementById("test").style.display="block";
+                        }
+                }
+                else
+                {
+                        document.getElementById("test").style.display="none";
+                }
+
+                if (rotate)
+                { 
+                      arc=(arc>6.28)? 0 : arc+0.01;
+                      arcx=Math.floor(Math.cos(arc)*radius);
+                      arcz=Math.floor(Math.sin(arc)*radius);
+                      camera.position.x=arcx;
+                      camera.position.z=arcz;
+                }                       
+                camera.lookAt( target );
+                renderer.render( scene, camera );
 
             }
 
@@ -103,6 +120,7 @@ var mouse3D, isMouseDown = false, onMouseDownPosition, theta = 45, onMouseDownTh
                     particle.position.y = stars[star][1]-210;
                     particle.position.z = stars[star][2]-210;
                     particle.scale.x = particle.scale.y = 10;
+                    particle.name=stars[star][3];
                     scene.add( particle );
                     particles.push(particle); 
                 }
@@ -123,7 +141,6 @@ var mouse3D, isMouseDown = false, onMouseDownPosition, theta = 45, onMouseDownTh
                 event.preventDefault();
 
                 isMouseDown = false;
-                arc=Math.abs(Math.atan(camera.position.z/camera.position.x));
                 onMouseDownPosition.x = event.clientX - onMouseDownPosition.x;
                 onMouseDownPosition.y = event.clientY - onMouseDownPosition.y;
 
@@ -144,6 +161,7 @@ var mouse3D, isMouseDown = false, onMouseDownPosition, theta = 45, onMouseDownTh
                 event.preventDefault();
 
                 isMouseDown = true;
+                rotate=false;
 
                 onMouseDownTheta = theta;
                 onMouseDownPhi = phi;
@@ -155,7 +173,10 @@ var mouse3D, isMouseDown = false, onMouseDownPosition, theta = 45, onMouseDownTh
             function onDocumentMouseMove( event ) {
 
                 event.preventDefault();
-
+                mouse.x = ( event.clientX / window.innerWidth ) * 2 - 1;
+                mouse.y = - ( event.clientY / window.innerHeight ) * 2 + 1;
+                position.x=event.clientX;
+                position.y=event.clientY;
                 if ( isMouseDown ) {
 
                     theta = - ( ( event.clientX - onMouseDownPosition.x ) * 0.5 ) + onMouseDownTheta;
@@ -186,5 +207,6 @@ var mouse3D, isMouseDown = false, onMouseDownPosition, theta = 45, onMouseDownTh
 
         }            
         </script>
+<div id="test" style="position:absolute;z-index:10;color:white;display:none"></div>
     </body>
 </html>
