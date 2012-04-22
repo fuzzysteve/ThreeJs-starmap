@@ -45,7 +45,7 @@ $miny=$row->miny;
 $minz=$row->minz;
 }
 
-$sql="select solarsystemname,floor((x-?)/? *420) x ,floor((y-?)/? *420) y,floor((z-?)/? *420) z  from mapSolarSystems where constellationid=?";
+$sql="select solarsystemname,security,floor((x-?)/? *420) x ,floor((y-?)/? *420) y,floor((z-?)/? *420) z,luminosity  from mapSolarSystems where constellationid=?";
 
 $stmt = $dbh->prepare($sql);
 $stmt->execute(array($minx,$scaler,$miny,$scaler,$minz,$scaler,$constellation));
@@ -53,11 +53,37 @@ $stmt->execute(array($minx,$scaler,$miny,$scaler,$minz,$scaler,$constellation));
 $stars="stars=[";
 while ($row = $stmt->fetchObject())
 {
-$stars.="[".$row->x.",".$row->y.",".$row->z.',"'.$row->solarsystemname.'"],';
+$stars.="[".$row->x.",".$row->y.",".$row->z.',"'.$row->solarsystemname.'",'.$row->luminosity.'],';
 }
 $stars=trim($stars,",");
 
-echo $stars."];"?>
+echo $stars."];";
+
+
+$sql="select floor((mss1.x- :minx)/:scalar *420) fx ,floor((mss1.y- :miny)/:scalar *420) fy,floor((mss1.z- :minz)/:scalar *420) fz,floor((mss2.x- :minx)/:scalar *420) tx ,floor((mss2.y- :miny)/:scalar *420) ty,floor((mss2.z- :minz)/:scalar *420) tz  from mapSolarSystems mss1,mapSolarSystems mss2,mapSolarSystemJumps where mss1.solarsystemid=fromSolarSystemID and mss2.solarsystemid=toSolarSystemID and fromconstellationid=:constellation";
+
+
+$stmt = $dbh->prepare($sql);
+$stmt->execute(array(":minx"=>$minx,":miny"=>$miny,":minz"=>$minz,":scalar"=>$scaler,":constellation"=>$constellation));
+
+$jumps="jumps=[";
+while ($row = $stmt->fetchObject())
+{
+$jumps.="[".$row->fx.",".$row->fy.",".$row->fz.','.$row->tx.",".$row->ty.",".$row->tz."],";
+}
+$jumps=trim($jumps,",");
+echo $jumps."];";
+
+
+
+
+
+
+
+
+
+
+?>
 
 
 target = new THREE.Vector3( 0, 0, 0 );
@@ -157,7 +183,7 @@ var mouse = { x: 0, y: 0 }, INTERSECTED,position= { x: 0, y: 0 };
                 var particle, material; 
                 var geometry = new THREE.SphereGeometry( 10,16,16);
                 for ( var star in stars ) {
-                    var particle = new THREE.Mesh( geometry, new THREE.MeshLambertMaterial( { color: Math.random() * 0xffffff } ) );
+                    var particle = new THREE.Mesh( geometry, new THREE.MeshLambertMaterial( { color: stars[star][4] * 0xffffff } ) );
                     particle.position.x = stars[star][0]-210;
                     particle.position.y = stars[star][1]-210;
                     particle.position.z = stars[star][2]-210;
@@ -165,6 +191,16 @@ var mouse = { x: 0, y: 0 }, INTERSECTED,position= { x: 0, y: 0 };
                     scene.add( particle );
                     particles.push(particle); 
                 }
+                var material = new THREE.LineBasicMaterial( { color: 0xcccccc, opacity: 0.4, linewidth: 1 } );
+                
+                for (var jump in jumps){
+                     var geometry = new THREE.Geometry();
+                     geometry.vertices.push(new THREE.Vertex(new THREE.Vector3(jumps[jump][0]-210, jumps[jump][1]-210, jumps[jump][2]-210)));
+                     geometry.vertices.push(new THREE.Vertex(new THREE.Vector3(jumps[jump][3]-210, jumps[jump][4]-210, jumps[jump][5]-210)));
+                     var line = new THREE.Line( geometry,  material );
+                     scene.add(line);
+                }
+
                 
             }
             
