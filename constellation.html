@@ -23,7 +23,7 @@
 require_once('db.inc.php');
 
 $constellation=20000020;
-if (array_key_exists('region',$_GET) && is_numeric($_GET['region']))
+if (array_key_exists('constellation',$_GET) && is_numeric($_GET['constellation']))
 {
 $constellation=$_GET['constellation'];
 }
