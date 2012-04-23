@@ -83,8 +83,8 @@ echo "constellation=".$constellation.";";
 
 
 ?>
-
-
+// Edit this!
+url="http://www.fuzzwork.co.uk/starmap/constellation.html";
 target = new THREE.Vector3( 0, 0, 0 );
 arc=0;
 radius=700;
@@ -264,7 +264,7 @@ rotate=true;
 
                 if ( intersects.length > 0 ) {
                           if (intersects[ 0 ].object.constellation!=constellation){
-                              window.location="http://www.fuzzwork.co.uk/three/constellation.html?constellation="+INTERSECTED.constellation;
+                              window.location=url+"?constellation="+INTERSECTED.constellation;
                         }
                 }
 
