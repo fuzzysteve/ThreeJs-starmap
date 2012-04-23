@@ -192,6 +192,7 @@ var mouse = { x: 0, y: 0 }, INTERSECTED,position= { x: 0, y: 0 };
                     particle.position.y = stars[star][1]-210;
                     particle.position.z = stars[star][2]-210;
                     particle.name=stars[star][3];
+                    particle.constellation=stars[star][5];
                     scene.add( particle );
                     particles.push(particle); 
                 }
@@ -253,6 +254,19 @@ rotate=true;
                 onMouseDownPhi = phi;
                 onMouseDownPosition.x = event.clientX;
                 onMouseDownPosition.y = event.clientY;
+
+
+                var vector = new THREE.Vector3( mouse.x, mouse.y, 1 );
+                projector.unprojectVector( vector, camera );
+                var ray = new THREE.Ray( camera.position, vector.subSelf( camera.position ).normalize() );
+
+                var intersects = ray.intersectObjects( scene.children );
+
+                if ( intersects.length > 0 ) {
+                          if (intersects[ 0 ].object.constellation!=constellation){
+                              window.location="http://www.fuzzwork.co.uk/three/constellation.html?constellation="+INTERSECTED.constellation;
+                        }
+                }
 
             }
 
