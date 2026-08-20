@@ -146,7 +146,6 @@ $jumpRows[]=array('fx'=>(float)$row->fx,'fy'=>(float)$row->fy,'fz'=>(float)$row-
 <div id="searchResults"></div>
 </div>
 <div id="constellationName"><?php echo htmlspecialchars($constellationName, ENT_QUOTES, 'UTF-8'); ?><?php if ($regionId) { ?> <a href="region.php?region=<?php echo $regionId; ?>">view region</a><?php } ?><?php if ($zoomSystem !== null) { ?> <a href="system.php?system=<?php echo $zoomSystem; ?>">view system contents</a><?php } ?></div>
-        <script src="Three.js"></script>
 
         <script>
 stars=<?php echo json_encode($starRows); ?>;
@@ -159,7 +158,7 @@ function linkBuilder(star) {
     return "constellation.php?constellation=" + star.constellationid + "&system=" + star.systemid;
 }
         </script>
-        <script src="viewer.js"></script>
+        <script type="module" src="viewer.js"></script>
         <script src="search.js"></script>
     </body>
 </html>

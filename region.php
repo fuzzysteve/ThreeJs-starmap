@@ -141,7 +141,6 @@ $jumpRows[]=array('fx'=>(float)$row->fx,'fy'=>(float)$row->fy,'fz'=>(float)$row-
 <div id="searchResults"></div>
 </div>
 <div id="regionName"><?php echo htmlspecialchars($regionName, ENT_QUOTES, 'UTF-8'); ?></div>
-        <script src="Three.js"></script>
 
         <script>
 stars=<?php echo json_encode($starRows); ?>;
@@ -157,7 +156,7 @@ function linkBuilder(star) {
     return "region.php?region=" + star.regionid;
 }
         </script>
-        <script src="viewer.js"></script>
+        <script type="module" src="viewer.js"></script>
         <script src="search.js"></script>
     </body>
 </html>

@@ -1,5 +1,7 @@
 // Renders a solar system's contents (star, planets, moons, belts, stations,
-// stargates) using the same Three.js orbit-camera mechanics as viewer.js.
+// stargates) using the same Three.js (WebGL, r185) orbit-camera mechanics
+// as viewer.js. Runs entirely client-side - the PHP page only emits the
+// data below as plain globals before loading this file as an ES module.
 //
 // The including page must define, before loading this file:
 //   items - array of {id,x,y,z,name,type,orbitid,destSystemId}
@@ -20,6 +22,8 @@
 // just that planet and its moons, since a moon's real distance from its
 // planet is usually far too small to show at whole-system scale.
 
+import * as THREE from './three.module.min.js';
+
 var TYPE_STYLE = {
     'Sun':           { color: 0xffee88, size: 24, label: '#ffffaa', labelSize: 14 },
     'Secondary Sun': { color: 0xffee88, size: 20, label: '#ffffaa', labelSize: 14 },
@@ -32,14 +36,14 @@ var TYPE_STYLE = {
 };
 var DEFAULT_STYLE = { color: 0xcccccc, size: 6, label: '#aaaaaa', labelSize: 9 };
 
-target = new THREE.Vector3( 0, 0, 0 );
-arc = 0;
-radius = 700;
+var target = new THREE.Vector3( 0, 0, 0 );
+var arc = 0;
+var radius = 700;
 var isMouseDown = false, onMouseDownPosition, theta = 45, onMouseDownTheta = 45, phi = 60, onMouseDownPhi = 60, isShiftDown = false;
 var rotate = true;
 var mouse = { x: 0, y: 0 };
 
-var camera, scene, renderer, projector, particles = [];
+var camera, scene, renderer, raycaster, particles = [];
 
 init();
 
@@ -50,20 +54,18 @@ function init() {
     camera.lookAt( target );
 
     scene = new THREE.Scene();
-    scene.add( camera );
 
-    renderer = new THREE.CanvasRenderer();
+    renderer = new THREE.WebGLRenderer( { antialias: true } );
     renderer.setSize( window.innerWidth, window.innerHeight );
     document.body.appendChild( renderer.domElement );
 
-    projector = new THREE.Projector();
+    raycaster = new THREE.Raycaster();
     makeParticles();
 
     document.addEventListener( 'mousemove', onDocumentMouseMove, false );
     document.addEventListener( 'mousedown', onDocumentMouseDown, false );
     document.addEventListener( 'mouseup', onDocumentMouseUp, false );
-    document.addEventListener( 'mousewheel', onDocumentMouseWheel, false );
-    document.addEventListener( 'DOMMouseScroll', onDocumentMouseWheel, false );
+    document.addEventListener( 'wheel', onDocumentMouseWheel, false );
     onMouseDownPosition = new THREE.Vector2();
 
     setInterval( update, 1000 / 30 );
@@ -89,8 +91,7 @@ function updateLabels() {
 
     for ( var i = 0; i < particles.length; i++ ) {
         var p = particles[ i ];
-        var vector = p.position.clone();
-        projector.projectVector( vector, camera );
+        var vector = p.position.clone().project( camera );
 
         p.label.style.left = ( vector.x * halfWidth + halfWidth + 12 ) + "px";
         p.label.style.top = ( -vector.y * halfHeight + halfHeight - 6 ) + "px";
@@ -109,7 +110,7 @@ function makeParticles() {
         var style = TYPE_STYLE[ item.type ] || DEFAULT_STYLE;
 
         var geometry = new THREE.SphereGeometry( style.size, 12, 12 );
-        var particle = new THREE.Mesh( geometry, new THREE.MeshLambertMaterial( { color: style.color } ) );
+        var particle = new THREE.Mesh( geometry, new THREE.MeshBasicMaterial( { color: style.color } ) );
         particle.position.x = item.x - offset;
         particle.position.y = item.y - offset;
         particle.position.z = item.z - offset;
@@ -155,7 +156,7 @@ function makeParticles() {
 
         var stationPos = positionById[ stationItem.id ];
         var parentPos = positionById[ stationItem.orbitid ];
-        var away = new THREE.Vector3().sub( stationPos, parentPos );
+        var away = stationPos.clone().sub( parentPos );
 
         if ( away.length() < 0.001 ) {
             away.set( 1, 0, 0 );
@@ -188,31 +189,31 @@ function makeParticles() {
 // is a simple, arbitrary approximation)
 function drawOrbitRing( parentPos, childPos, color ) {
 
-    var toChild = new THREE.Vector3().sub( childPos, parentPos );
-    var radius = toChild.length();
+    var toChild = childPos.clone().sub( parentPos );
+    var ringRadius = toChild.length();
 
-    if ( radius < 1 ) {
+    if ( ringRadius < 1 ) {
         return;
     }
 
-    var u = toChild.clone().divideScalar( radius );
+    var u = toChild.clone().divideScalar( ringRadius );
     var helper = ( Math.abs( u.y ) > 0.9 ) ? new THREE.Vector3( 1, 0, 0 ) : new THREE.Vector3( 0, 1, 0 );
-    var v = new THREE.Vector3().cross( u, helper ).normalize();
+    var v = u.clone().cross( helper ).normalize();
 
     var segments = 64;
-    var geometry = new THREE.Geometry();
+    var points = [];
 
     for ( var k = 0; k <= segments; k++ ) {
         var angle = ( k / segments ) * Math.PI * 2;
-        var point = new THREE.Vector3(
-            parentPos.x + ( u.x * Math.cos( angle ) + v.x * Math.sin( angle ) ) * radius,
-            parentPos.y + ( u.y * Math.cos( angle ) + v.y * Math.sin( angle ) ) * radius,
-            parentPos.z + ( u.z * Math.cos( angle ) + v.z * Math.sin( angle ) ) * radius
-        );
-        geometry.vertices.push( new THREE.Vertex( point ) );
+        points.push( new THREE.Vector3(
+            parentPos.x + ( u.x * Math.cos( angle ) + v.x * Math.sin( angle ) ) * ringRadius,
+            parentPos.y + ( u.y * Math.cos( angle ) + v.y * Math.sin( angle ) ) * ringRadius,
+            parentPos.z + ( u.z * Math.cos( angle ) + v.z * Math.sin( angle ) ) * ringRadius
+        ) );
     }
 
-    var material = new THREE.LineBasicMaterial( { color: color, opacity: 0.5 } );
+    var geometry = new THREE.BufferGeometry().setFromPoints( points );
+    var material = new THREE.LineBasicMaterial( { color: color, transparent: true, opacity: 0.5 } );
     scene.add( new THREE.Line( geometry, material ) );
 }
 
@@ -251,11 +252,10 @@ function onDocumentMouseDown( event ) {
     onMouseDownPosition.x = event.clientX;
     onMouseDownPosition.y = event.clientY;
 
-    var vector = new THREE.Vector3( mouse.x, mouse.y, 1 );
-    projector.unprojectVector( vector, camera );
-    var ray = new THREE.Ray( camera.position, vector.subSelf( camera.position ).normalize() );
-
-    var intersects = ray.intersectObjects( scene.children );
+    raycaster.setFromCamera( new THREE.Vector2( mouse.x, mouse.y ), camera );
+    var intersects = raycaster.intersectObjects( scene.children ).filter( function ( hit ) {
+        return hit.object.isMesh;
+    } );
 
     if ( intersects.length > 0 ) {
         var hit = intersects[ 0 ].object;
@@ -299,12 +299,8 @@ function positionCameraFromOrbit() {
 
 function onDocumentMouseWheel( event ) {
 
-    if ( event.detail ) {
-        radius -= event.detail * 10;
-    }
-    if ( event.wheelDelta ) {
-        radius -= event.wheelDelta;
-    }
+    radius += event.deltaY * 0.5;
+
     if ( !rotate ) {
         positionCameraFromOrbit();
     }

@@ -291,14 +291,13 @@ $sidebarByPlanet[$pid]['items'][]=array('id'=>(int)$row->itemid,'name'=>$row->it
 <?php if ($regionId) { ?> <a href="region.php?region=<?php echo $regionId; ?>">view region</a><?php } ?>
 <?php } ?>
 </div>
-        <script src="Three.js"></script>
 
         <script>
 items=<?php echo json_encode($itemRows); ?>;
 currentSystemId=<?php echo (int)$system; ?>;
 currentPlanetId=<?php echo $planet === null ? 'null' : $planet; ?>;
         </script>
-        <script src="systemViewer.js"></script>
+        <script type="module" src="systemViewer.js"></script>
         <script src="search.js"></script>
     </body>
 </html>

@@ -1,6 +1,6 @@
 Very simple at the moment. Needs serious work on the rotational stuff.
 
-Requires a mysql copy of the Static Data Export from Eve Online, along with PHP with PDO embedded in it. Also requires a copy of Three.js from https://github.com/mrdoob/three.js/tree/master/build in the same directory
+Requires a mysql copy of the Static Data Export from Eve Online, along with PHP with PDO embedded in it. Also requires three.core.min.js and three.module.min.js from the "three" npm package's build/ directory (https://www.npmjs.com/package/three), in the same directory - the renderer loads three.module.min.js as an ES module (viewer.js/systemViewer.js need to be included with <script type="module">).
 
 Check out the code, rename db.inc.php.example to db.inc.php, edit the connection details, edit the url variable to point at your own version, then open the page in a browser. click on the grey planets to go to a new constellation.
 

@@ -1,4 +1,6 @@
-// Shared Three.js star renderer for constellation.php and region.php.
+// Shared Three.js (WebGL, r185) star renderer for constellation.php and
+// region.php. Runs entirely client-side - the PHP pages only emit the data
+// below as plain globals before loading this file as an ES module.
 //
 // The including page must define, before loading this file:
 //   stars         - array of {x,y,z,name,luminosity,constellationid,regionid,systemid}
@@ -8,14 +10,16 @@
 //   zoomSystemId  - systemid to center the camera on, or null
 //   linkBuilder(star) - returns the URL to navigate to when a star is clicked
 
-target = new THREE.Vector3( 0, 0, 0 );
-arc = 0;
-radius = 700;
+import * as THREE from './three.module.min.js';
+
+var target = new THREE.Vector3( 0, 0, 0 );
+var arc = 0;
+var radius = 700;
 var isMouseDown = false, onMouseDownPosition, theta = 45, onMouseDownTheta = 45, phi = 60, onMouseDownPhi = 60, isShiftDown = false;
 var rotate = true;
 var mouse = { x: 0, y: 0 };
 
-var camera, scene, renderer, projector, particles = [];
+var camera, scene, renderer, raycaster, particles = [];
 
 init();
 
@@ -26,20 +30,18 @@ function init() {
     camera.lookAt( target );
 
     scene = new THREE.Scene();
-    scene.add( camera );
 
-    renderer = new THREE.CanvasRenderer();
+    renderer = new THREE.WebGLRenderer( { antialias: true } );
     renderer.setSize( window.innerWidth, window.innerHeight );
     document.body.appendChild( renderer.domElement );
 
-    projector = new THREE.Projector();
+    raycaster = new THREE.Raycaster();
     makeParticles();
 
     document.addEventListener( 'mousemove', onDocumentMouseMove, false );
     document.addEventListener( 'mousedown', onDocumentMouseDown, false );
     document.addEventListener( 'mouseup', onDocumentMouseUp, false );
-    document.addEventListener( 'mousewheel', onDocumentMouseWheel, false );
-    document.addEventListener( 'DOMMouseScroll', onDocumentMouseWheel, false );
+    document.addEventListener( 'wheel', onDocumentMouseWheel, false );
     onMouseDownPosition = new THREE.Vector2();
 
     setInterval( update, 1000 / 30 );
@@ -67,8 +69,7 @@ function updateLabels() {
 
     for ( var i = 0; i < particles.length; i++ ) {
         var p = particles[ i ];
-        var vector = p.position.clone();
-        projector.projectVector( vector, camera );
+        var vector = p.position.clone().project( camera );
 
         p.label.style.left = ( vector.x * halfWidth + halfWidth + 12 ) + "px";
         p.label.style.top = ( -vector.y * halfHeight + halfHeight - 6 ) + "px";
@@ -86,7 +87,7 @@ function makeParticles() {
         var isCurrent = ( star[ groupField ] === currentGroupId );
         var color = isCurrent ? ( star.luminosity * 0xffffff ) : 0x333333;
 
-        var particle = new THREE.Mesh( geometry, new THREE.MeshLambertMaterial( { color: color } ) );
+        var particle = new THREE.Mesh( geometry, new THREE.MeshBasicMaterial( { color: color } ) );
         particle.position.x = star.x - offset;
         particle.position.y = star.y - offset;
         particle.position.z = star.z - offset;
@@ -114,13 +115,14 @@ function makeParticles() {
         radius = 120;
     }
 
-    var material = new THREE.LineBasicMaterial( { color: 0xcccccc, opacity: 0.4, linewidth: 1 } );
+    var material = new THREE.LineBasicMaterial( { color: 0xcccccc, transparent: true, opacity: 0.4 } );
 
     for ( var j = 0; j < jumps.length; j++ ) {
         var jump = jumps[ j ];
-        var geo = new THREE.Geometry();
-        geo.vertices.push( new THREE.Vertex( new THREE.Vector3( jump.fx - offset, jump.fy - offset, jump.fz - offset ) ) );
-        geo.vertices.push( new THREE.Vertex( new THREE.Vector3( jump.tx - offset, jump.ty - offset, jump.tz - offset ) ) );
+        var geo = new THREE.BufferGeometry().setFromPoints( [
+            new THREE.Vector3( jump.fx - offset, jump.fy - offset, jump.fz - offset ),
+            new THREE.Vector3( jump.tx - offset, jump.ty - offset, jump.tz - offset )
+        ] );
         scene.add( new THREE.Line( geo, material ) );
     }
 }
@@ -160,11 +162,10 @@ function onDocumentMouseDown( event ) {
     onMouseDownPosition.x = event.clientX;
     onMouseDownPosition.y = event.clientY;
 
-    var vector = new THREE.Vector3( mouse.x, mouse.y, 1 );
-    projector.unprojectVector( vector, camera );
-    var ray = new THREE.Ray( camera.position, vector.subSelf( camera.position ).normalize() );
-
-    var intersects = ray.intersectObjects( scene.children );
+    raycaster.setFromCamera( new THREE.Vector2( mouse.x, mouse.y ), camera );
+    var intersects = raycaster.intersectObjects( scene.children ).filter( function ( hit ) {
+        return hit.object.isMesh;
+    } );
 
     if ( intersects.length > 0 && intersects[ 0 ].object.systemid ) {
         window.location = linkBuilder( intersects[ 0 ].object );
@@ -202,12 +203,8 @@ function positionCameraFromOrbit() {
 
 function onDocumentMouseWheel( event ) {
 
-    if ( event.detail ) {
-        radius -= event.detail * 10;
-    }
-    if ( event.wheelDelta ) {
-        radius -= event.wheelDelta;
-    }
+    radius += event.deltaY * 0.5;
+
     if ( !rotate ) {
         positionCameraFromOrbit();
     }
