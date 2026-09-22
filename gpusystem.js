@@ -218,7 +218,7 @@ function escapeHtml( s ) {
 var el = {};
 [ 'viewport', 'labels', 'systemName', 'systemSec', 'systemLinks', 'tree', 'treeFilter', 'info',
     'status', 'lodStats', 'fps', 'fade', 'loading', 'search', 'searchResults', 'helpPanel',
-    'toggleOrbits', 'toggleLabels', 'toggleSky', 'sidebar' ].forEach( function ( id ) {
+    'toggleOrbits', 'toggleLabels', 'toggleSky', 'skyLight', 'sidebar' ].forEach( function ( id ) {
     el[ id ] = document.getElementById( id );
 } );
 
@@ -244,7 +244,7 @@ var hovered = null;
 var flight = null;
 var keys = {};
 var pointer = { x: -1, y: -1, down: false, button: 0, startX: 0, startY: 0, lastX: 0, lastY: 0, dragged: false };
-var settings = { orbits: true, labels: true, sky: true };
+var settings = { orbits: true, labels: true, sky: true, skyLight: 1 };
 var loadToken = 0;
 
 var view = { w: 1, h: 1, dpr: 1, pxPerRad: 1, right: [ 1, 0, 0 ], up: [ 0, 1, 0 ], fwd: [ 0, 0, -1 ] };
@@ -384,8 +384,57 @@ function buildBodies( items ) {
     } );
 }
 
+// Ambient "skybox" light for the night side of bodies. There's no skybox
+// texture, so the real star catalogue stands in for one: every system's
+// direction and apparent brightness is projected into 9 spherical-harmonic
+// coefficients, which the sphere shader turns into irradiance per normal.
+// Normalised so the average over the sphere is 1 - the slider and
+// SKY_AMBIENT set the actual level, SKY_FLOOR keeps empty sky from going
+// fully black
+var SKY_AMBIENT = 0.13;
+var SKY_FLOOR = 0.35;
+var SKY_TINT = [ 0.62, 0.72, 1.0 ];
+
+var skySH = null;
+
+function buildSkyLight() {
+    var ly = sky.metresPerLy;
+    var here = [ sys.x / ly, sys.y / ly, sys.z / ly ];
+    var s = sky.stars;
+    var sh = [ 0, 0, 0, 0, 0, 0, 0, 0, 0 ];
+    for ( var i = 0; i < s.length; i += 4 ) {
+        var dx = s[ i ] - here[ 0 ], dy = s[ i + 1 ] - here[ 1 ], dz = s[ i + 2 ] - here[ 2 ];
+        var dist = Math.sqrt( dx * dx + dy * dy + dz * dz );
+        if ( dist < 0.01 ) continue;
+        var x = dx / dist, y = dy / dist, z = dz / dist;
+        // same apparent brightness the background star is drawn with
+        var w = clamp( 2.2 / ( 0.6 + dist ), 0.06, 1 );
+        sh[ 0 ] += w * 0.282095;
+        sh[ 1 ] += w * 0.488603 * y;
+        sh[ 2 ] += w * 0.488603 * z;
+        sh[ 3 ] += w * 0.488603 * x;
+        sh[ 4 ] += w * 1.092548 * x * y;
+        sh[ 5 ] += w * 1.092548 * y * z;
+        sh[ 6 ] += w * 0.315392 * ( 3 * z * z - 1 );
+        sh[ 7 ] += w * 1.092548 * x * z;
+        sh[ 8 ] += w * 0.546274 * ( x * x - y * y );
+    }
+    // mean irradiance over the sphere is c4 * L00
+    var k = sh[ 0 ] > 0 ? 1 / ( 0.886227 * sh[ 0 ] ) : 0;
+    skySH = sh.map( function ( c ) { return c * k; } );
+    applySkyLight();
+}
+
+function applySkyLight() {
+    if ( !renderer ) return;
+    var level = SKY_AMBIENT * settings.skyLight;
+    var tint = SKY_TINT.map( function ( c ) { return c * level; } );
+    renderer.setSkyLight( skySH || [ 1 / 0.886227, 0, 0, 0, 0, 0, 0, 0, 0 ], tint, SKY_FLOOR );
+}
+
 function buildSky() {
     if ( !sky || !sys || !renderer ) return;
+    buildSkyLight();
     if ( !settings.sky ) {
         renderer.setSky( new Float32Array( 0 ), 0 );
         skyGateLabels = [];
@@ -1437,6 +1486,11 @@ async function boot() {
     } );
     el.treeFilter.addEventListener( 'input', applyTreeFilter );
     [ el.toggleOrbits, el.toggleLabels, el.toggleSky ].forEach( function ( t ) { t.addEventListener( 'change', syncToggles ); } );
+    el.skyLight.addEventListener( 'input', function () {
+        settings.skyLight = parseFloat( el.skyLight.value );
+        applySkyLight();
+    } );
+    applySkyLight();
     document.getElementById( 'helpToggle' ).addEventListener( 'click', function () { el.helpPanel.classList.toggle( 'open' ); } );
     document.getElementById( 'sidebarToggle' ).addEventListener( 'click', function () { el.sidebar.classList.toggle( 'collapsed' ); } );
     setupSearch();

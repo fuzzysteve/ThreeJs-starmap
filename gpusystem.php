@@ -181,6 +181,7 @@ input[type=text]:focus { border-color: var(--accent); }
 #status { color: var(--text); }
 #lodStats { flex: 1; overflow: hidden; text-overflow: ellipsis; }
 #statusbar label { cursor: pointer; display: flex; align-items: center; gap: 3px; }
+#skyLight { width: 70px; accent-color: var(--accent); }
 #helpToggle { padding: 1px 8px; }
 
 #helpPanel {
@@ -260,6 +261,7 @@ kbd { font: 11px monospace; border: 1px solid var(--panel-border); border-radius
     <label><input type="checkbox" id="toggleOrbits" checked> Orbits</label>
     <label><input type="checkbox" id="toggleLabels" checked> Labels</label>
     <label><input type="checkbox" id="toggleSky" checked> Sky</label>
+    <label title="Ambient light from the star field on the night side of bodies">Sky light <input type="range" id="skyLight" min="0" max="3" step="0.1" value="1"></label>
     <span id="fps"></span>
     <button id="helpToggle" title="Controls (?)">?</button>
 </div>

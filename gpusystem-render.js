@@ -37,6 +37,10 @@ struct Frame {
     invViewRot : mat4x4f,
     viewport : vec4f,   // width, height, 1/width, 1/height
     params : vec4f,     // tanHalfFovY, aspect, near, time
+    sh0 : vec4f,        // sky irradiance as 9 L2 spherical-harmonic
+    sh1 : vec4f,        // coefficients (sh0.xyzw, sh1.xyzw, sh2.x),
+    sh2 : vec4f,        // normalised so the sphere-average irradiance is 1
+    skyLight : vec4f,   // rgb tint * strength, w = ambient floor
 };
 @group(0) @binding(0) var<uniform> frame : Frame;
 `;
@@ -96,6 +100,21 @@ fn vs(@builtin(vertex_index) vi : u32, @builtin(instance_index) ii : u32) -> VOu
     out.pos = frame.proj * vec4f(p, 1.0) / d;
     out.ray = p / d;
     return out;
+}
+
+// Ramamoorthi & Hanrahan irradiance from L2 SH - the sky's light arriving
+// on a surface facing n. Star-dense directions (the galactic band) come
+// out brighter than empty sky, so the night side isn't uniformly flat
+fn skyIrradiance(n : vec3f) -> vec3f {
+    let c1 = 0.429043; let c2 = 0.511664; let c3 = 0.743125; let c4 = 0.886227; let c5 = 0.247708;
+    let L00 = frame.sh0.x; let L1m1 = frame.sh0.y; let L10 = frame.sh0.z; let L11 = frame.sh0.w;
+    let L2m2 = frame.sh1.x; let L2m1 = frame.sh1.y; let L20 = frame.sh1.z; let L21 = frame.sh1.w;
+    let L22 = frame.sh2.x;
+    let e = c1 * L22 * (n.x * n.x - n.y * n.y) + c3 * L20 * n.z * n.z + c4 * L00 - c5 * L20
+        + 2.0 * c1 * (L2m2 * n.x * n.y + L21 * n.x * n.z + L2m1 * n.y * n.z)
+        + 2.0 * c2 * (L11 * n.x + L1m1 * n.y + L10 * n.z);
+    let floorLevel = frame.skyLight.w;
+    return frame.skyLight.rgb * (floorLevel + (1.0 - floorLevel) * max(e, 0.0));
 }
 
 fn hash3(p : vec3f) -> f32 {
@@ -262,7 +281,7 @@ fn fs(in : VOut) -> FOut {
     } else {
         let lambert = max(dot(n, s.sunDir), 0.0);
         let terminator = smoothstep(-0.1, 0.25, dot(n, s.sunDir));
-        col = surf.albedo * (lambert * 1.1 + 0.015) + surf.emissive;
+        col = surf.albedo * (lambert * 1.1 + skyIrradiance(n)) + surf.emissive;
         let rim = pow(1.0 - viewCos, 3.0);
         col += surf.atmosphere * rim * s.params.w * terminator * 0.9;
     }
@@ -481,10 +500,13 @@ export class Renderer {
         } );
 
         this.frameBuffer = device.createBuffer( {
-            size: 4 * ( 16 * 3 + 8 ),
+            size: 4 * ( 16 * 3 + 24 ),
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
         } );
-        this.frameData = new Float32Array( 16 * 3 + 8 );
+        this.frameData = new Float32Array( 16 * 3 + 24 );
+        // flat sky until the caller supplies a real one
+        this.skySH = new Float32Array( [ 1 / 0.886227, 0, 0, 0, 0, 0, 0, 0, 0 ] );
+        this.skyLight = [ 0.1, 0.11, 0.14, 1 ];
 
         this.frameLayout = device.createBindGroupLayout( { entries: [
             { binding: 0, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } }
@@ -627,10 +649,23 @@ export class Renderer {
         f[ 53 ] = aspect;
         f[ 54 ] = near;
         f[ 55 ] = time;
+        for ( var k = 0; k < 9; k++ ) f[ 56 + k ] = this.skySH[ k ];
+        f[ 68 ] = this.skyLight[ 0 ];
+        f[ 69 ] = this.skyLight[ 1 ];
+        f[ 70 ] = this.skyLight[ 2 ];
+        f[ 71 ] = this.skyLight[ 3 ];
         this.device.queue.writeBuffer( this.frameBuffer, 0, f );
     }
 
     setSky( data, count ) { this.sky.upload( data, count ); }
+
+    // sh: 9 SH coefficients (L00, L1-1, L10, L11, L2-2, L2-1, L20, L21, L22)
+    // tint: rgb already multiplied by strength; floor: fraction of the
+    // ambient that is direction-independent
+    setSkyLight( sh, tint, floor ) {
+        this.skySH.set( sh );
+        this.skyLight = [ tint[ 0 ], tint[ 1 ], tint[ 2 ], floor ];
+    }
     setSpheres( data, count ) { this.spheres.upload( data, count ); }
     setMarkers( data, count ) { this.markers.upload( data, count ); }
     setOverlay( data, count ) { this.overlay.upload( data, count ); }
