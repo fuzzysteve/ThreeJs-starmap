@@ -20,8 +20,11 @@
 //     are hidden behind nearer spheres, and are decluttered by priority
 //   - orbit rings fade in by projected size and get more segments the
 //     larger they appear
+//   - asteroid belts grow a procedural rock field once the field itself
+//     spans a few pixels; each rock is then culled on its own size, so
+//     from afar only the big ones show and the rubble fills in as you close
 
-import { Renderer, SPHERE_FLOATS, MARKER_FLOATS, LINE_FLOATS, SHAPE } from './gpusystem-render.js';
+import { Renderer, SPHERE_FLOATS, MARKER_FLOATS, LINE_FLOATS, MESH_FLOATS, MESH_STYLE, GATE_RING, SHAPE } from './gpusystem-render.js';
 
 var DATA_URL = 'gpusystem-data.php';
 var SEARCH_URL = 'search.php';
@@ -35,6 +38,9 @@ var MARKER_MAX_PX = 4;          // above this a body's disc is its own marker
 var CHILD_MARKER_SEP_PX = 8;    // moon/station/belt marker needs this gap from its parent
 var CHILD_LABEL_SEP_PX = 26;    // ...and this much before it earns a label
 var RING_MIN_PX = 4;
+var ROCKFIELD_MIN_PX = 6;       // a belt's rock field is generated/drawn once it spans this
+var ROCK_MIN_PX = 0.75;         // an individual rock below this is dropped
+var ROCK_VARIANTS = 4;
 
 // the SDE has no radius for stations or stargates - these are display
 // sizes only, and the UI says so wherever it shows them
@@ -148,6 +154,23 @@ function qLookAt( forward, up ) {
     return qFromBasis( r, u, v3scale( f, -1 ) );
 }
 
+// small seeded PRNG so a belt or station looks the same on every visit
+function mulberry32( seed ) {
+    var a = seed >>> 0;
+    return function () {
+        a = ( a + 0x6D2B79F5 ) | 0;
+        var t = Math.imul( a ^ ( a >>> 15 ), 1 | a );
+        t = ( t + Math.imul( t ^ ( t >>> 7 ), 61 | t ) ) ^ t;
+        return ( ( t ^ ( t >>> 14 ) ) >>> 0 ) / 4294967296;
+    };
+}
+// uniformly distributed random orientation (Shoemake)
+function randomQuat( rng ) {
+    var u1 = rng(), u2 = rng() * Math.PI * 2, u3 = rng() * Math.PI * 2;
+    var a = Math.sqrt( 1 - u1 ), b = Math.sqrt( u1 );
+    return [ a * Math.sin( u2 ), a * Math.cos( u2 ), b * Math.sin( u3 ), b * Math.cos( u3 ) ];
+}
+
 function smoothstep( a, b, x ) {
     var t = Math.max( 0, Math.min( 1, ( x - a ) / ( b - a ) ) );
     return t * t * ( 3 - 2 * t );
@@ -213,6 +236,163 @@ function escapeHtml( s ) {
     } );
 }
 
+// -------------------------------------------------------------- geometry
+
+// flat-shaded triangle, wound counter-clockwise seen from outside (the
+// shapes here are all star-shaped around the origin)
+function pushTri( out, a, b, c ) {
+    var n = v3cross( v3sub( b, a ), v3sub( c, a ) );
+    if ( v3dot( n, v3add( v3add( a, b ), c ) ) < 0 ) {
+        var t = b; b = c; c = t;
+        n = v3scale( n, -1 );
+    }
+    n = v3norm( n );
+    [ a, b, c ].forEach( function ( v ) { out.push( v[ 0 ], v[ 1 ], v[ 2 ], n[ 0 ], n[ 1 ], n[ 2 ] ); } );
+}
+
+// regular dodecahedron, circumradius 1. Built face by face: the 12 face
+// normals are the icosahedron's vertices, and each face is the 5 corners
+// furthest along its normal, fanned into 3 triangles
+function buildDodecahedron() {
+    var phi = ( 1 + Math.sqrt( 5 ) ) / 2, ip = 1 / phi;
+    var verts = [];
+    [ -1, 1 ].forEach( function ( x ) { [ -1, 1 ].forEach( function ( y ) { [ -1, 1 ].forEach( function ( z ) { verts.push( [ x, y, z ] ); } ); } ); } );
+    [ -1, 1 ].forEach( function ( a ) {
+        [ -1, 1 ].forEach( function ( b ) {
+            verts.push( [ 0, a * ip, b * phi ], [ a * ip, b * phi, 0 ], [ a * phi, 0, b * ip ] );
+        } );
+    } );
+    verts = verts.map( function ( v ) { return v3scale( v, 1 / Math.sqrt( 3 ) ); } );
+
+    var normals = [];
+    [ -1, 1 ].forEach( function ( a ) {
+        [ -1, 1 ].forEach( function ( b ) {
+            normals.push( v3norm( [ 0, a * phi, b ] ), v3norm( [ a, 0, b * phi ] ), v3norm( [ a * phi, b, 0 ] ) );
+        } );
+    } );
+
+    var out = [];
+    normals.forEach( function ( f ) {
+        var face = verts.slice().sort( function ( p, q ) { return v3dot( q, f ) - v3dot( p, f ); } ).slice( 0, 5 );
+        var e1 = v3norm( v3sub( face[ 0 ], v3scale( f, v3dot( face[ 0 ], f ) ) ) );
+        var e2 = v3cross( f, e1 );
+        face.sort( function ( p, q ) {
+            return Math.atan2( v3dot( p, e2 ), v3dot( p, e1 ) ) - Math.atan2( v3dot( q, e2 ), v3dot( q, e1 ) );
+        } );
+        for ( var i = 1; i < 4; i++ ) pushTri( out, face[ 0 ], face[ i ], face[ i + 1 ] );
+    } );
+    return new Float32Array( out );
+}
+
+// lumpy asteroid: an icosphere (320 faces) pushed in and out by a handful
+// of random broad lobes, flat-shaded so it reads as faceted rock
+function buildRock( seed ) {
+    var rng = mulberry32( seed * 7919 + 17 );
+    var t = ( 1 + Math.sqrt( 5 ) ) / 2;
+    var verts = [ [ -1, t, 0 ], [ 1, t, 0 ], [ -1, -t, 0 ], [ 1, -t, 0 ], [ 0, -1, t ], [ 0, 1, t ],
+        [ 0, -1, -t ], [ 0, 1, -t ], [ t, 0, -1 ], [ t, 0, 1 ], [ -t, 0, -1 ], [ -t, 0, 1 ] ].map( v3norm );
+    var faces = [ [ 0, 11, 5 ], [ 0, 5, 1 ], [ 0, 1, 7 ], [ 0, 7, 10 ], [ 0, 10, 11 ], [ 1, 5, 9 ], [ 5, 11, 4 ],
+        [ 11, 10, 2 ], [ 10, 7, 6 ], [ 7, 1, 8 ], [ 3, 9, 4 ], [ 3, 4, 2 ], [ 3, 2, 6 ], [ 3, 6, 8 ], [ 3, 8, 9 ],
+        [ 4, 9, 5 ], [ 2, 4, 11 ], [ 6, 2, 10 ], [ 8, 6, 7 ], [ 9, 8, 1 ] ];
+    for ( var level = 0; level < 2; level++ ) {
+        var cache = {}, next = [];
+        var mid = function ( a, b ) {
+            var key = a < b ? a + '_' + b : b + '_' + a;
+            if ( cache[ key ] === undefined ) {
+                verts.push( v3norm( v3scale( v3add( verts[ a ], verts[ b ] ), 0.5 ) ) );
+                cache[ key ] = verts.length - 1;
+            }
+            return cache[ key ];
+        };
+        faces.forEach( function ( f ) {
+            var ab = mid( f[ 0 ], f[ 1 ] ), bc = mid( f[ 1 ], f[ 2 ] ), ca = mid( f[ 2 ], f[ 0 ] );
+            next.push( [ f[ 0 ], ab, ca ], [ f[ 1 ], bc, ab ], [ f[ 2 ], ca, bc ], [ ab, bc, ca ] );
+        } );
+        faces = next;
+    }
+
+    var lobes = [];
+    for ( var k = 0; k < 9; k++ ) {
+        lobes.push( { d: v3norm( [ rng() * 2 - 1, rng() * 2 - 1, rng() * 2 - 1 ] ), a: ( rng() * 2 - 1 ) * 0.28, p: 2 + rng() * 4 } );
+    }
+    var maxR = 0;
+    var shaped = verts.map( function ( v ) {
+        var r = 1 + ( rng() - 0.5 ) * 0.06;
+        lobes.forEach( function ( l ) { r += l.a * Math.pow( Math.max( v3dot( v, l.d ), 0 ), l.p ); } );
+        r = Math.max( r, 0.45 );
+        maxR = Math.max( maxR, r );
+        return v3scale( v, r );
+    } );
+    shaped = shaped.map( function ( v ) { return v3scale( v, 1 / maxR ); } );
+
+    var out = [];
+    faces.forEach( function ( f ) { pushTri( out, shaped[ f[ 0 ] ], shaped[ f[ 1 ] ], shaped[ f[ 2 ] ] ); } );
+    return new Float32Array( out );
+}
+
+// stargate ring: a torus around local +z with circumradius 1. Winding and
+// smooth normals are written out directly - the centroid test in pushTri
+// doesn't work for a shape with a hole
+function buildTorus( major, minor, segU, segV ) {
+    var out = [];
+    var vert = function ( i, j ) {
+        var u = i / segU * Math.PI * 2, v = j / segV * Math.PI * 2;
+        var cu = Math.cos( u ), su = Math.sin( u ), cv = Math.cos( v ), sv = Math.sin( v );
+        return [ ( major + minor * cv ) * cu, ( major + minor * cv ) * su, minor * sv, cv * cu, cv * su, sv ];
+    };
+    for ( var i = 0; i < segU; i++ ) {
+        for ( var j = 0; j < segV; j++ ) {
+            // (du x dv) points outward, so this order is counter-clockwise
+            var a = vert( i, j ), b = vert( i + 1, j ), c = vert( i + 1, j + 1 ), d = vert( i, j + 1 );
+            [ a, b, c, a, c, d ].forEach( function ( p ) { out.push.apply( out, p ); } );
+        }
+    }
+    return new Float32Array( out );
+}
+
+var ROCK_TONES = [ [ 0.46, 0.41, 0.35 ], [ 0.38, 0.37, 0.36 ], [ 0.52, 0.43, 0.32 ], [ 0.42, 0.44, 0.48 ], [ 0.33, 0.29, 0.26 ] ];
+
+// Procedural rock field for an asteroid belt - the SDE gives a belt a
+// single position and nothing about its rocks, so these are invented
+// (seeded by the belt's itemID so they're stable). A few clumps inside a
+// flattened ellipsoid 25-60km across, rock radii following a power law
+// from ~250m up to a handful of multi-km giants
+function beltField( b ) {
+    if ( b.field ) return b.field;
+    var rng = mulberry32( b.id );
+    var R = 25000 + rng() * 35000;
+    var count = 180 + Math.floor( rng() * 170 );
+    var e1 = anyPerpendicular( ecliptic ), e2 = v3cross( ecliptic, e1 );
+    var clumps = [];
+    var nClumps = 3 + Math.floor( rng() * 5 );
+    for ( var c = 0; c < nClumps; c++ ) {
+        clumps.push( [ ( rng() * 2 - 1 ) * R * 0.55, ( rng() * 2 - 1 ) * R * 0.15, ( rng() * 2 - 1 ) * R * 0.55 ] );
+    }
+    var gauss = function () {
+        return Math.sqrt( -2 * Math.log( Math.max( rng(), 1e-9 ) ) ) * Math.cos( 2 * Math.PI * rng() );
+    };
+    var rocks = [];
+    for ( var i = 0; i < count; i++ ) {
+        var cl = clumps[ Math.floor( rng() * clumps.length ) ];
+        var spread = R * ( 0.18 + rng() * 0.2 );
+        var lx = cl[ 0 ] + gauss() * spread, ly = cl[ 1 ] + gauss() * spread * 0.35, lz = cl[ 2 ] + gauss() * spread;
+        var r = i < 3 ? 3500 + rng() * 5000 : Math.min( 250 * Math.pow( 1 - rng() * 0.995, -0.55 ), 6000 );
+        var tone = ROCK_TONES[ Math.floor( rng() * ROCK_TONES.length ) ];
+        var shade = 0.8 + rng() * 0.4;
+        rocks.push( {
+            off: v3add( v3add( v3scale( e1, lx ), v3scale( ecliptic, ly ) ), v3scale( e2, lz ) ),
+            r: r,
+            stretch: [ 0.75 + rng() * 0.5, 0.55 + rng() * 0.45, 0.75 + rng() * 0.5 ],
+            q: randomQuat( rng ),
+            variant: Math.floor( rng() * ROCK_VARIANTS ),
+            color: [ tone[ 0 ] * shade, tone[ 1 ] * shade, tone[ 2 ] * shade ],
+            seed: rng()
+        } );
+    }
+    b.field = { radius: R, rocks: rocks };
+    return b.field;
+}
+
 // ----------------------------------------------------------------- state
 
 var el = {};
@@ -253,6 +433,8 @@ var sphereData = new Float32Array( SPHERE_FLOATS * 256 );
 var markerData = new Float32Array( MARKER_FLOATS * 512 );
 var overlayData = new Float32Array( MARKER_FLOATS * 8 );
 var lineData = new Float32Array( LINE_FLOATS * 8192 );
+var meshData = new Float32Array( MESH_FLOATS * 1024 );
+var meshes = null;              // { station, rocks: [] } GPU vertex buffers
 
 var labelPool = [];
 var labelRects = [];
@@ -303,7 +485,7 @@ function buildBodies( items ) {
             marker: SHAPE.DOT, markerPx: 3,
             // per-frame scratch
             rel: [ 0, 0, 0 ], dist: 0, depth: 0, sx: 0, sy: 0, pxR: 0, onScreen: false,
-            drawSphere: false, drawMarker: false, markerAlpha: 0, sepPx: Infinity
+            drawSphere: false, drawMesh: false, drawBody: false, drawMarker: false, markerAlpha: 0, sepPx: Infinity
         };
 
         if ( kind === 'sun' ) {
@@ -326,13 +508,25 @@ function buildBodies( items ) {
             b.hasSphere = b.radius > 0;
             b.marker = SHAPE.DOT; b.markerPx = 2.5;
         } else if ( kind === 'station' ) {
-            b.radius = NOMINAL_RADIUS.station; b.nominal = true; b.hasSphere = true;
-            b.color = [ 0.55, 0.62, 0.68 ]; b.css = '#33ffcc'; b.shade = 11;
+            // drawn as a dodecahedron; hasSphere still drives collision and
+            // picking, using the dodecahedron's circumradius
+            b.radius = NOMINAL_RADIUS.station; b.nominal = true; b.hasSphere = true; b.mesh = 'station';
+            b.color = [ 0.55, 0.6, 0.66 ]; b.css = '#33ffcc'; b.shade = 11;
+            b.meshQ = randomQuat( mulberry32( it.id ) );
             b.marker = SHAPE.SQUARE; b.markerPx = 4;
         } else if ( kind === 'gate' ) {
-            b.radius = NOMINAL_RADIUS.gate; b.nominal = true; b.hasSphere = true;
-            b.color = [ 0.7, 0.55, 0.35 ]; b.shade = 12;
+            // drawn as a ring whose axis points at the destination system,
+            // so you look through it the way it jumps
+            b.radius = NOMINAL_RADIUS.gate; b.nominal = true; b.hasSphere = true; b.mesh = 'gate';
             b.css = b.dest ? secColor( b.dest.security ) : '#ffaa33';
+            b.color = cssToRgb( b.css );
+            if ( b.dest ) {
+                var axis = v3norm( [ b.dest.x - sys.x, b.dest.y - sys.y, b.dest.z - sys.z ] );
+                var side = anyPerpendicular( axis );
+                b.meshQ = qFromBasis( side, v3cross( axis, side ), axis );
+            } else {
+                b.meshQ = randomQuat( mulberry32( it.id ) );
+            }
             b.marker = SHAPE.DIAMOND; b.markerPx = 5;
         } else if ( kind === 'belt' ) {
             // belt "radius" in the SDE isn't a body size, so it's marker-only
@@ -571,7 +765,7 @@ function placeAtGate( gate ) {
 
 function viewDistanceFor( b ) {
     if ( b.kind === 'sun' ) return b.radius * 5;
-    if ( b.kind === 'belt' ) return 150000;
+    if ( b.kind === 'belt' ) return beltField( b ).radius * 2.4;
     if ( b.kind === 'other' ) return 5e7;
     if ( b.nominal ) return b.radius * 6;
     return b.radius * 3.2;
@@ -678,18 +872,36 @@ function updateMovement( dt ) {
     cam.currentSpeed = v3len( cam.vel );
 }
 
+function pushOutOf( centre, minD ) {
+    var off = v3sub( cam.pos, centre );
+    var d = v3len( off );
+    if ( d >= minD ) return;
+    var dir = d > 0 ? v3scale( off, 1 / d ) : [ 0, 0, 1 ];
+    cam.pos = v3add( centre, v3scale( dir, minD ) );
+    var into = v3dot( cam.vel, dir );
+    if ( into < 0 ) cam.vel = v3sub( cam.vel, v3scale( dir, into ) );
+}
+
 function resolveCollisions() {
     for ( var i = 0; i < bodies.length; i++ ) {
         var b = bodies[ i ];
-        if ( !b.hasSphere ) continue;
-        var off = v3sub( cam.pos, b.pos );
-        var d = v3len( off );
-        var minD = b.radius * 1.0005 + 20;
-        if ( d < minD ) {
-            var dir = d > 0 ? v3scale( off, 1 / d ) : [ 0, 0, 1 ];
-            cam.pos = v3add( b.pos, v3scale( dir, minD ) );
-            var into = v3dot( cam.vel, dir );
-            if ( into < 0 ) cam.vel = v3sub( cam.vel, v3scale( dir, into ) );
+        if ( b.mesh === 'gate' ) {
+            // keep clear of the ring's tube, but let the camera fly through the hole
+            var axis = qRot( b.meshQ, [ 0, 0, 1 ] );
+            var rel = v3sub( cam.pos, b.pos );
+            var planar = v3sub( rel, v3scale( axis, v3dot( rel, axis ) ) );
+            if ( v3len( planar ) > 1e-6 ) {
+                pushOutOf( v3add( b.pos, v3scale( v3norm( planar ), GATE_RING.major * b.radius ) ), GATE_RING.minor * b.radius + 20 );
+            }
+        } else if ( b.hasSphere ) {
+            pushOutOf( b.pos, b.radius * 1.0005 + 20 );
+        }
+        // rocks only matter once we're inside a generated field
+        if ( b.field && v3len( v3sub( cam.pos, b.pos ) ) < b.field.radius * 2 ) {
+            for ( var k = 0; k < b.field.rocks.length; k++ ) {
+                var rock = b.field.rocks[ k ];
+                pushOutOf( v3add( b.pos, rock.off ), rock.r * 0.85 + 20 );
+            }
         }
     }
 }
@@ -741,7 +953,7 @@ function project( rel ) {
     };
 }
 
-var lodCounts = { spheres: 0, markers: 0, labels: 0, hidden: 0, rings: 0 };
+var lodCounts = { spheres: 0, markers: 0, labels: 0, hidden: 0, rings: 0, rocks: 0 };
 
 function updateLod() {
     lodCounts.spheres = lodCounts.markers = lodCounts.hidden = 0;
@@ -763,7 +975,10 @@ function updateLod() {
         if ( p.z <= 0 ) b.onScreen = b.hasSphere && b.dist < b.radius * 3;
         b.sepPx = b.parent ? v3len( v3sub( b.pos, b.parent.pos ) ) / Math.max( b.dist, 1 ) * view.pxPerRad : Infinity;
 
-        b.drawSphere = b.onScreen && b.hasSphere && b.pxR >= SPHERE_MIN_PX;
+        var bodyVisible = b.onScreen && b.hasSphere && b.pxR >= SPHERE_MIN_PX;
+        b.drawSphere = bodyVisible && !b.mesh;
+        b.drawMesh = bodyVisible && !!b.mesh;
+        b.drawBody = bodyVisible;
         b.drawMarker = false;
         b.markerAlpha = 0;
 
@@ -783,9 +998,9 @@ function updateLod() {
             b.markerAlpha = 1;
         }
 
-        if ( b.drawSphere ) lodCounts.spheres++;
+        if ( b.drawBody ) lodCounts.spheres++;
         if ( b.drawMarker && b.kind !== 'sun' ) lodCounts.markers++;
-        if ( !b.drawSphere && !b.drawMarker ) lodCounts.hidden++;
+        if ( !b.drawBody && !b.drawMarker ) lodCounts.hidden++;
     }
 }
 
@@ -812,6 +1027,81 @@ function writeSpheres() {
         n++;
     }
     renderer.setSpheres( sphereData, n );
+}
+
+function putMesh( n, rel, scale, q, stretch, seed, color, style ) {
+    var needed = ( n + 1 ) * MESH_FLOATS;
+    if ( meshData.length < needed ) {
+        var grown = new Float32Array( Math.max( needed, meshData.length * 2 ) );
+        grown.set( meshData );
+        meshData = grown;
+    }
+    var o = n * MESH_FLOATS;
+    meshData[ o ] = rel[ 0 ]; meshData[ o + 1 ] = rel[ 1 ]; meshData[ o + 2 ] = rel[ 2 ];
+    meshData[ o + 3 ] = scale;
+    meshData[ o + 4 ] = q[ 0 ]; meshData[ o + 5 ] = q[ 1 ]; meshData[ o + 6 ] = q[ 2 ]; meshData[ o + 7 ] = q[ 3 ];
+    meshData[ o + 8 ] = stretch[ 0 ]; meshData[ o + 9 ] = stretch[ 1 ]; meshData[ o + 10 ] = stretch[ 2 ];
+    meshData[ o + 11 ] = seed;
+    meshData[ o + 12 ] = color[ 0 ]; meshData[ o + 13 ] = color[ 1 ]; meshData[ o + 14 ] = color[ 2 ];
+    meshData[ o + 15 ] = style;
+}
+
+var UNIT_STRETCH = [ 1, 1, 1 ];
+
+function writeMeshes() {
+    var n = 0, draws = [];
+    lodCounts.rocks = 0;
+
+    var first;
+    [ [ 'station', MESH_STYLE.STATION ], [ 'gate', MESH_STYLE.GATE ] ].forEach( function ( kind ) {
+        first = n;
+        for ( var i = 0; i < bodies.length; i++ ) {
+            var b = bodies[ i ];
+            if ( !b.drawMesh || b.mesh !== kind[ 0 ] ) continue;
+            putMesh( n++, b.rel, b.radius, b.meshQ, UNIT_STRETCH, b.seed, b.color, kind[ 1 ] );
+        }
+        draws.push( { mesh: meshes[ kind[ 0 ] ], first: first, count: n - first } );
+    } );
+
+    // rocks, bucketed by variant so each variant is one contiguous draw
+    var buckets = [];
+    for ( var v = 0; v < ROCK_VARIANTS; v++ ) buckets.push( [] );
+    for ( var j = 0; j < bodies.length; j++ ) {
+        var belt = bodies[ j ];
+        if ( belt.kind !== 'belt' ) continue;
+        var d = v3len( v3sub( belt.pos, cam.pos ) );
+        // largest possible field radius, so we don't generate fields we can't see
+        if ( !belt.field && 60000 / Math.max( d, 1 ) * view.pxPerRad < ROCKFIELD_MIN_PX ) continue;
+        var field = beltField( belt );
+        if ( field.radius / Math.max( d, 1 ) * view.pxPerRad < ROCKFIELD_MIN_PX ) continue;
+        if ( v3dot( v3sub( belt.pos, cam.pos ), view.fwd ) < -field.radius ) continue;
+
+        for ( var k = 0; k < field.rocks.length; k++ ) {
+            var rock = field.rocks[ k ];
+            var rel = v3sub( v3add( belt.pos, rock.off ), cam.pos );
+            var dist = v3len( rel );
+            var extent = rock.r * Math.max( rock.stretch[ 0 ], rock.stretch[ 1 ], rock.stretch[ 2 ] );
+            var px = extent / Math.max( dist, 1 ) * view.pxPerRad;
+            if ( px < ROCK_MIN_PX ) continue;
+            var z = v3dot( rel, view.fwd );
+            if ( z < -extent ) continue;
+            if ( z > extent ) {
+                var p = project( rel );
+                if ( p.x < -px || p.x > view.w + px || p.y < -px || p.y > view.h + px ) continue;
+            }
+            buckets[ rock.variant ].push( { rock: rock, rel: rel } );
+        }
+    }
+    for ( var bv = 0; bv < ROCK_VARIANTS; bv++ ) {
+        first = n;
+        buckets[ bv ].forEach( function ( e ) {
+            putMesh( n++, e.rel, e.rock.r, e.rock.q, e.rock.stretch, e.rock.seed, e.rock.color, MESH_STYLE.ROCK );
+        } );
+        lodCounts.rocks += n - first;
+        draws.push( { mesh: meshes.rocks[ bv ], first: first, count: n - first } );
+    }
+
+    renderer.setMeshes( meshData, n, draws );
 }
 
 function putMarker( arr, n, rel, sizeCss, rgb, occlude, shape, alpha ) {
@@ -922,7 +1212,7 @@ function writeRings() {
 function occluded( b ) {
     for ( var i = 0; i < bodies.length; i++ ) {
         var o = bodies[ i ];
-        if ( o === b || !o.drawSphere || o.pxR < 3 || o.depth <= 0 ) continue;
+        if ( o === b || !o.drawBody || o.pxR < 3 || o.depth <= 0 ) continue;
         if ( o.dist + o.radius * 0.1 >= b.dist ) continue;
         var dx = b.sx - o.sx, dy = b.sy - o.sy;
         if ( dx * dx + dy * dy < o.pxR * o.pxR * 0.95 ) return true;
@@ -935,7 +1225,7 @@ function updateLabels() {
     if ( settings.labels ) {
         for ( var i = 0; i < bodies.length; i++ ) {
             var b = bodies[ i ];
-            if ( !( b.drawSphere || b.drawMarker ) || b.depth <= 0 ) continue;
+            if ( !( b.drawBody || b.drawMarker ) || b.depth <= 0 ) continue;
             var important = b === selected || b === hovered;
             if ( !important ) {
                 if ( b.kind === 'other' ) continue;
@@ -953,6 +1243,13 @@ function updateLabels() {
                 var p = project( g.dir );
                 if ( p.z <= 0 ) return;
                 if ( p.x < 0 || p.x > view.w || p.y < 0 || p.y > view.h ) return;
+                // the sky is behind everything, so any drawn body covers it
+                for ( var o = 0; o < bodies.length; o++ ) {
+                    var ob = bodies[ o ];
+                    if ( !ob.drawBody || ob.depth <= 0 ) continue;
+                    var dx = p.x - ob.sx, dy = p.y - ob.sy;
+                    if ( dx * dx + dy * dy < ob.pxR * ob.pxR ) return;
+                }
                 candidates.push( { body: g.gate, sky: true, pri: 5, x: p.x, y: p.y, offset: 4 } );
             } );
         }
@@ -1035,8 +1332,10 @@ function frame( now ) {
     computeView();
     updateLod();
     writeSpheres();
+    writeMeshes();
     writeMarkers();
     writeRings();
+    renderer.setSun( sun ? v3sub( sun.pos, cam.pos ) : [ 0, 0, 0 ] );
     renderer.setFrame( viewRotation(), FOV_Y, NEAR, ( now - startTime ) / 1000 );
     renderer.render();
     updateLabels();
@@ -1073,7 +1372,8 @@ function updateHud() {
     el.status.textContent = mode + '  ·  ' + speed + '  ·  throttle ' + fmtSpeed( maxSpeed ) +
         ( sun ? '  ·  ' + fmtDistance( v3len( v3sub( cam.pos, sun.pos ) ) ) + ' from star' : '' );
     el.lodStats.textContent = 'LOD: ' + lodCounts.spheres + ' bodies · ' + lodCounts.markers + ' markers · ' +
-        lodCounts.labels + ' labels · ' + lodCounts.rings + ' orbits · ' + lodCounts.hidden + ' too small/off-screen';
+        lodCounts.labels + ' labels · ' + lodCounts.rings + ' orbits · ' +
+        ( lodCounts.rocks ? lodCounts.rocks + ' rocks · ' : '' ) + lodCounts.hidden + ' too small/off-screen';
 
     if ( selected ) {
         var dEl = document.getElementById( 'infoDistance' );
@@ -1275,14 +1575,14 @@ function pick( x, y ) {
     var best = null, bestScore = Infinity;
     for ( var i = 0; i < bodies.length; i++ ) {
         var b = bodies[ i ];
-        if ( !( b.drawSphere || b.drawMarker ) || b.depth <= 0 ) continue;
+        if ( !( b.drawBody || b.drawMarker ) || b.depth <= 0 ) continue;
         var dx = x - b.sx, dy = y - b.sy;
         var d = Math.sqrt( dx * dx + dy * dy );
-        var reach = b.drawSphere ? Math.max( b.pxR, 7 ) : b.markerPx + 7;
+        var reach = b.drawBody ? Math.max( b.pxR, 7 ) : b.markerPx + 7;
         if ( b.kind === 'sun' ) reach = Math.max( b.pxR, 12 );
         if ( d > reach ) continue;
         // inside a disc the nearest body wins; otherwise the closest marker
-        var score = ( b.drawSphere && d <= b.pxR ) ? b.dist / 1e30 : 1 + d;
+        var score = ( b.drawBody && d <= b.pxR ) ? b.dist / 1e30 : 1 + d;
         if ( score < bestScore ) { bestScore = score; best = b; }
     }
     return best;
@@ -1470,6 +1770,13 @@ async function boot() {
         el.fade.classList.remove( 'on' );
         return;
     }
+
+    meshes = {
+        station: renderer.createMesh( buildDodecahedron(), 'dodecahedron' ),
+        gate: renderer.createMesh( buildTorus( GATE_RING.major, GATE_RING.minor, 72, 16 ), 'stargate ring' ),
+        rocks: []
+    };
+    for ( var rv = 0; rv < ROCK_VARIANTS; rv++ ) meshes.rocks.push( renderer.createMesh( buildRock( rv + 1 ), 'rock ' + rv ) );
 
     el.viewport.addEventListener( 'pointerdown', onPointerDown );
     window.addEventListener( 'pointermove', onPointerMove );

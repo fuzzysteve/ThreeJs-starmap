@@ -15,8 +15,10 @@
 // depth. That gives a perfect silhouette at any scale - no tessellation
 // LOD to pop between, and no faceting when skimming a planet's surface.
 //
-// Three passes, all into one 4x MSAA target:
+// Four passes, all into one 4x MSAA target:
 //   spheres  - opaque impostors, writes depth, alpha-to-coverage edges
+//   meshes   - real triangle geometry for small objects (station
+//              dodecahedra, asteroid-belt rocks), instanced per mesh
 //   lines    - orbit rings, depth-tested, blended
 //   markers  - screen-space sprites (LOD stand-ins, sun glow, sky stars,
 //              selection brackets), depth-tested, premultiplied blending
@@ -25,6 +27,11 @@
 export const SPHERE_FLOATS = 16;
 export const MARKER_FLOATS = 12;
 export const LINE_FLOATS = 8;
+export const MESH_FLOATS = 16;
+export const MESH_STYLE = { ROCK: 0, STATION: 1, GATE: 2 };
+// stargate torus proportions (circumradius 1); the shader needs the major
+// radius to tell the inner rim from the outer
+export const GATE_RING = { major: 0.86, minor: 0.14 };
 
 export const SHAPE = {
     DOT: 0, RING: 1, DIAMOND: 2, SQUARE: 3, TRIANGLE: 4, CROSS: 5, BRACKET: 6, GLOW: 7, STAR: 8
@@ -41,8 +48,57 @@ struct Frame {
     sh1 : vec4f,        // coefficients (sh0.xyzw, sh1.xyzw, sh2.x),
     sh2 : vec4f,        // normalised so the sphere-average irradiance is 1
     skyLight : vec4f,   // rgb tint * strength, w = ambient floor
+    sunRel : vec4f,     // star centre, camera-relative, world axes
 };
 @group(0) @binding(0) var<uniform> frame : Frame;
+
+// Ramamoorthi & Hanrahan irradiance from L2 SH - the sky's light arriving
+// on a surface facing n. Star-dense directions (the galactic band) come
+// out brighter than empty sky, so the night side isn't uniformly flat
+fn skyIrradiance(n : vec3f) -> vec3f {
+    let c1 = 0.429043; let c2 = 0.511664; let c3 = 0.743125; let c4 = 0.886227; let c5 = 0.247708;
+    let L00 = frame.sh0.x; let L1m1 = frame.sh0.y; let L10 = frame.sh0.z; let L11 = frame.sh0.w;
+    let L2m2 = frame.sh1.x; let L2m1 = frame.sh1.y; let L20 = frame.sh1.z; let L21 = frame.sh1.w;
+    let L22 = frame.sh2.x;
+    let e = c1 * L22 * (n.x * n.x - n.y * n.y) + c3 * L20 * n.z * n.z + c4 * L00 - c5 * L20
+        + 2.0 * c1 * (L2m2 * n.x * n.y + L21 * n.x * n.z + L2m1 * n.y * n.z)
+        + 2.0 * c2 * (L11 * n.x + L1m1 * n.y + L10 * n.z);
+    let floorLevel = frame.skyLight.w;
+    return frame.skyLight.rgb * (floorLevel + (1.0 - floorLevel) * max(e, 0.0));
+}
+
+fn hash3(p : vec3f) -> f32 {
+    var q = fract(p * 0.3183099 + vec3f(0.71, 0.113, 0.419));
+    q *= 17.0;
+    return fract(q.x * q.y * q.z * (q.x + q.y + q.z));
+}
+
+fn vnoise(p : vec3f) -> f32 {
+    let i = floor(p);
+    let f = fract(p);
+    let u = f * f * (3.0 - 2.0 * f);
+    return mix(mix(mix(hash3(i + vec3f(0,0,0)), hash3(i + vec3f(1,0,0)), u.x),
+                   mix(hash3(i + vec3f(0,1,0)), hash3(i + vec3f(1,1,0)), u.x), u.y),
+               mix(mix(hash3(i + vec3f(0,0,1)), hash3(i + vec3f(1,0,1)), u.x),
+                   mix(hash3(i + vec3f(0,1,1)), hash3(i + vec3f(1,1,1)), u.x), u.y), u.z);
+}
+
+// octave count comes from the CPU and scales with on-screen size: a
+// 3px moon gets one octave, a planet filling the screen gets eight
+fn fbm(p : vec3f, octaves : i32) -> f32 {
+    var sum = 0.0;
+    var amp = 0.5;
+    var q = p;
+    var norm = 0.0;
+    for (var o = 0; o < 8; o++) {
+        if (o >= octaves) { break; }
+        sum += vnoise(q) * amp;
+        norm += amp;
+        amp *= 0.5;
+        q = q * 2.03 + vec3f(1.7, 9.2, 3.1);
+    }
+    return sum / max(norm, 1e-4);
+}
 `;
 
 const SPHERE_WGSL = COMMON_WGSL + /* wgsl */`
@@ -100,54 +156,6 @@ fn vs(@builtin(vertex_index) vi : u32, @builtin(instance_index) ii : u32) -> VOu
     out.pos = frame.proj * vec4f(p, 1.0) / d;
     out.ray = p / d;
     return out;
-}
-
-// Ramamoorthi & Hanrahan irradiance from L2 SH - the sky's light arriving
-// on a surface facing n. Star-dense directions (the galactic band) come
-// out brighter than empty sky, so the night side isn't uniformly flat
-fn skyIrradiance(n : vec3f) -> vec3f {
-    let c1 = 0.429043; let c2 = 0.511664; let c3 = 0.743125; let c4 = 0.886227; let c5 = 0.247708;
-    let L00 = frame.sh0.x; let L1m1 = frame.sh0.y; let L10 = frame.sh0.z; let L11 = frame.sh0.w;
-    let L2m2 = frame.sh1.x; let L2m1 = frame.sh1.y; let L20 = frame.sh1.z; let L21 = frame.sh1.w;
-    let L22 = frame.sh2.x;
-    let e = c1 * L22 * (n.x * n.x - n.y * n.y) + c3 * L20 * n.z * n.z + c4 * L00 - c5 * L20
-        + 2.0 * c1 * (L2m2 * n.x * n.y + L21 * n.x * n.z + L2m1 * n.y * n.z)
-        + 2.0 * c2 * (L11 * n.x + L1m1 * n.y + L10 * n.z);
-    let floorLevel = frame.skyLight.w;
-    return frame.skyLight.rgb * (floorLevel + (1.0 - floorLevel) * max(e, 0.0));
-}
-
-fn hash3(p : vec3f) -> f32 {
-    var q = fract(p * 0.3183099 + vec3f(0.71, 0.113, 0.419));
-    q *= 17.0;
-    return fract(q.x * q.y * q.z * (q.x + q.y + q.z));
-}
-
-fn vnoise(p : vec3f) -> f32 {
-    let i = floor(p);
-    let f = fract(p);
-    let u = f * f * (3.0 - 2.0 * f);
-    return mix(mix(mix(hash3(i + vec3f(0,0,0)), hash3(i + vec3f(1,0,0)), u.x),
-                   mix(hash3(i + vec3f(0,1,0)), hash3(i + vec3f(1,1,0)), u.x), u.y),
-               mix(mix(hash3(i + vec3f(0,0,1)), hash3(i + vec3f(1,0,1)), u.x),
-                   mix(hash3(i + vec3f(0,1,1)), hash3(i + vec3f(1,1,1)), u.x), u.y), u.z);
-}
-
-// octave count comes from the CPU and scales with on-screen size: a
-// 3px moon gets one octave, a planet filling the screen gets eight
-fn fbm(p : vec3f, octaves : i32) -> f32 {
-    var sum = 0.0;
-    var amp = 0.5;
-    var q = p;
-    var norm = 0.0;
-    for (var o = 0; o < 8; o++) {
-        if (o >= octaves) { break; }
-        sum += vnoise(q) * amp;
-        norm += amp;
-        amp *= 0.5;
-        q = q * 2.03 + vec3f(1.7, 9.2, 3.1);
-    }
-    return sum / max(norm, 1e-4);
 }
 
 struct Surface {
@@ -226,11 +234,6 @@ fn shade(kind : i32, n : vec3f, base : vec3f, seed : f32, oct : i32) -> Surface 
             let crack = 1.0 - smoothstep(0.0, 0.03, abs(h - 0.5));
             s.albedo = vec3f(0.35, 0.3, 0.28) * (0.5 + h) * (1.0 - crack * 0.8);
             s.emissive = vec3f(0.9, 0.4, 0.1) * crack * 0.4;
-        }
-        case 11, 12: { // station / stargate - panelled metal
-            let panel = step(0.5, fract(n.x * 12.0)) * 0.1 + step(0.5, fract(n.y * 12.0)) * 0.1;
-            s.albedo = base * (0.6 + panel);
-            s.emissive = base * 0.08;
         }
         default: { // moon and anything else - lightly cratered rock
             let h = fbm(p * 3.5, oct);
@@ -407,6 +410,92 @@ fn fs(in : VOut) -> @location(0) vec4f {
 }
 `;
 
+const MESH_WGSL = COMMON_WGSL + /* wgsl */`
+struct MeshInst {
+    center : vec3f,     // camera-relative, world axes
+    scale : f32,        // circumradius in metres
+    rot : vec4f,        // orientation quaternion
+    stretch : vec3f,    // per-axis squash, applied before rotation
+    seed : f32,
+    color : vec3f,
+    style : f32,        // 0 rock, 1 station, 2 stargate (color = glow tint)
+};
+@group(1) @binding(0) var<storage, read> meshes : array<MeshInst>;
+
+struct VIn {
+    @location(0) pos : vec3f,
+    @location(1) normal : vec3f,
+};
+struct VOut {
+    @builtin(position) pos : vec4f,
+    @location(0) normal : vec3f,
+    @location(1) obj : vec3f,
+    @location(2) world : vec3f,
+    @location(3) @interpolate(flat) idx : u32,
+};
+
+fn qrot(q : vec4f, v : vec3f) -> vec3f {
+    return v + 2.0 * cross(q.xyz, cross(q.xyz, v) + q.w * v);
+}
+
+@vertex
+fn vs(in : VIn, @builtin(instance_index) ii : u32) -> VOut {
+    let m = meshes[ii];
+    let world = m.center + qrot(m.rot, in.pos * m.stretch) * m.scale;
+    var out : VOut;
+    out.pos = frame.proj * (frame.viewRot * vec4f(world, 1.0));
+    out.normal = qrot(m.rot, in.normal / m.stretch);
+    out.obj = in.pos;
+    out.world = world;
+    out.idx = ii;
+    return out;
+}
+
+@fragment
+fn fs(in : VOut) -> @location(0) vec4f {
+    let m = meshes[in.idx];
+    let n = normalize(in.normal);
+    let sunDir = normalize(frame.sunRel.xyz - in.world);
+    let sunCos = dot(n, sunDir);
+    let lambert = max(sunCos, 0.0);
+
+    var albedo : vec3f;
+    var emissive = vec3f(0.0);
+    if (m.style > 1.5) {
+        // stargate ring: banded metal, the inner rim lit in the colour of
+        // the destination's security, running lights round the outer edge
+        let major = 0.86;
+        let radial = length(in.obj.xy);
+        let around = atan2(in.obj.y, in.obj.x) / 6.2831853 + 0.5;
+        let tube = atan2(in.obj.z, radial - major);
+        let band = step(0.5, fract(around * 36.0)) * 0.12 + step(0.92, fract(around * 6.0)) * -0.2;
+        albedo = vec3f(0.47, 0.45, 0.42) * (0.8 + band + 0.15 * vnoise(in.obj * 25.0));
+        let inner = smoothstep(0.3, 0.95, -cos(tube));
+        let beacon = (1.0 - smoothstep(0.0, 0.03, abs(fract(around * 8.0) - 0.5))) * smoothstep(0.85, 0.97, cos(tube));
+        emissive = m.color * inner * 0.8 + vec3f(1.0, 0.9, 0.7) * beacon * 1.5;
+    } else if (m.style > 0.5) {
+        // station: panelled plating, window lights that show on the dark side
+        let q = in.obj * 9.0;
+        let panel = step(0.5, fract(q.x + 0.5 * step(0.5, fract(q.y)))) * 0.08
+                  + step(0.94, fract(q.y * 2.0)) * -0.12;
+        albedo = m.color * (0.85 + panel + 0.15 * vnoise(in.obj * 30.0 + m.seed * 40.0));
+        let cell = floor(in.obj * 26.0 + vec3f(m.seed * 50.0));
+        let lit = step(0.9, hash3(cell));
+        let night = 1.0 - smoothstep(-0.05, 0.3, sunCos);
+        emissive = vec3f(1.0, 0.82, 0.55) * lit * (0.25 + 0.75 * night) * 0.9;
+    } else {
+        // rock: mottled, a little darker in the crevices
+        let h = fbm(in.obj * 3.0 + vec3f(m.seed * 23.0), 4);
+        let fine = vnoise(in.obj * 18.0 + vec3f(m.seed * 7.0));
+        albedo = m.color * (0.55 + 0.6 * h + 0.2 * fine);
+    }
+
+    var col = albedo * (lambert * 1.1 + skyIrradiance(n)) + emissive;
+    col = vec3f(1.0) - exp(-col * 1.6);
+    return vec4f(col, 1.0);
+}
+`;
+
 const LINE_WGSL = COMMON_WGSL + /* wgsl */`
 struct VIn {
     @location(0) pos : vec3f,
@@ -500,10 +589,11 @@ export class Renderer {
         } );
 
         this.frameBuffer = device.createBuffer( {
-            size: 4 * ( 16 * 3 + 24 ),
+            size: 4 * ( 16 * 3 + 28 ),
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
         } );
-        this.frameData = new Float32Array( 16 * 3 + 24 );
+        this.frameData = new Float32Array( 16 * 3 + 28 );
+        this.sunRel = [ 0, 0, 0 ];
         // flat sky until the caller supplies a real one
         this.skySH = new Float32Array( [ 1 / 0.886227, 0, 0, 0, 0, 0, 0, 0, 0 ] );
         this.skyLight = [ 0.1, 0.11, 0.14, 1 ];
@@ -525,6 +615,7 @@ export class Renderer {
         var sphereModule = device.createShaderModule( { label: 'spheres', code: SPHERE_WGSL } );
         var markerModule = device.createShaderModule( { label: 'markers', code: MARKER_WGSL } );
         var lineModule = device.createShaderModule( { label: 'lines', code: LINE_WGSL } );
+        var meshModule = device.createShaderModule( { label: 'meshes', code: MESH_WGSL } );
 
         this.spherePipeline = device.createRenderPipeline( {
             label: 'spheres',
@@ -534,6 +625,25 @@ export class Renderer {
             primitive: { topology: 'triangle-list' },
             depthStencil: { format: 'depth32float', depthWriteEnabled: true, depthCompare: 'greater' },
             multisample: { count: SAMPLES, alphaToCoverageEnabled: true }
+        } );
+
+        this.meshPipeline = device.createRenderPipeline( {
+            label: 'meshes',
+            layout: instancedLayout,
+            vertex: {
+                module: meshModule, entryPoint: 'vs',
+                buffers: [ {
+                    arrayStride: 24,
+                    attributes: [
+                        { shaderLocation: 0, offset: 0, format: 'float32x3' },
+                        { shaderLocation: 1, offset: 12, format: 'float32x3' }
+                    ]
+                } ]
+            },
+            fragment: { module: meshModule, entryPoint: 'fs', targets: [ { format: this.format } ] },
+            primitive: { topology: 'triangle-list', cullMode: 'back', frontFace: 'ccw' },
+            depthStencil: { format: 'depth32float', depthWriteEnabled: true, depthCompare: 'greater' },
+            multisample: { count: SAMPLES }
         } );
 
         this.linePipeline = device.createRenderPipeline( {
@@ -575,6 +685,8 @@ export class Renderer {
         this.markers = new InstanceBuffer( device, this.instanceLayout, MARKER_FLOATS, 'marker instances' );
         this.overlay = new InstanceBuffer( device, this.instanceLayout, MARKER_FLOATS, 'overlay instances' );
         this.sky = new InstanceBuffer( device, this.instanceLayout, MARKER_FLOATS, 'sky instances' );
+        this.meshes = new InstanceBuffer( device, this.instanceLayout, MESH_FLOATS, 'mesh instances' );
+        this.meshDraws = [];
 
         this.lineCapacity = 0;
         this.lineCount = 0;
@@ -654,6 +766,9 @@ export class Renderer {
         f[ 69 ] = this.skyLight[ 1 ];
         f[ 70 ] = this.skyLight[ 2 ];
         f[ 71 ] = this.skyLight[ 3 ];
+        f[ 72 ] = this.sunRel[ 0 ];
+        f[ 73 ] = this.sunRel[ 1 ];
+        f[ 74 ] = this.sunRel[ 2 ];
         this.device.queue.writeBuffer( this.frameBuffer, 0, f );
     }
 
@@ -667,6 +782,26 @@ export class Renderer {
         this.skyLight = [ tint[ 0 ], tint[ 1 ], tint[ 2 ], floor ];
     }
     setSpheres( data, count ) { this.spheres.upload( data, count ); }
+
+    // star position relative to the camera, for lighting meshes
+    setSun( rel ) { this.sunRel = rel; }
+
+    // vertices: interleaved position.xyz, normal.xyz, triangle-list with
+    // counter-clockwise outward winding
+    createMesh( vertices, label ) {
+        var buffer = this.device.createBuffer( {
+            label: label, size: vertices.byteLength, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST
+        } );
+        this.device.queue.writeBuffer( buffer, 0, vertices );
+        return { buffer: buffer, count: vertices.length / 6 };
+    }
+
+    // data: all mesh instances, grouped so each draw is a contiguous run;
+    // draws: [{ mesh, first, count }]
+    setMeshes( data, count, draws ) {
+        this.meshes.upload( data, count );
+        this.meshDraws = draws;
+    }
     setMarkers( data, count ) { this.markers.upload( data, count ); }
     setOverlay( data, count ) { this.overlay.upload( data, count ); }
 
@@ -704,6 +839,17 @@ export class Renderer {
             pass.setPipeline( this.spherePipeline );
             pass.setBindGroup( 1, this.spheres.bindGroup );
             pass.draw( 6, this.spheres.count );
+        }
+
+        if ( this.meshes.count > 0 && this.meshDraws.length ) {
+            pass.setPipeline( this.meshPipeline );
+            pass.setBindGroup( 1, this.meshes.bindGroup );
+            for ( var i = 0; i < this.meshDraws.length; i++ ) {
+                var d = this.meshDraws[ i ];
+                if ( d.count <= 0 ) continue;
+                pass.setVertexBuffer( 0, d.mesh.buffer );
+                pass.draw( d.mesh.count, d.count, 0, d.first );
+            }
         }
 
         if ( this.lineCount > 0 ) {
