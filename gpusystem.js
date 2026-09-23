@@ -556,7 +556,7 @@ function buildBodies( items ) {
     bodies.forEach( function ( b ) { b.shortName = shortNameFor( b ); } );
 
     // best-fit plane of the planets - used as "up" for the overview camera
-    // and as the tilt for orbit rings (the SDE has no orbital planes)
+    // and to flatten belt rock fields
     var planets = bodies.filter( function ( b ) { return b.kind === 'planet'; } );
     var n = [ 0, 0, 0 ];
     var origin = sun ? sun.pos : [ 0, 0, 0 ];
@@ -1142,16 +1142,33 @@ function writeMarkers() {
     renderer.setOverlay( overlayData, m );
 }
 
-// circle through `child` centred on `parent`, tilted toward the ecliptic.
-// vertex 0 sits exactly on the child so the line always threads the body
+// The SDE has no orbital planes, so this reproduces the in-game map's own
+// construction: a circle of radius |child - parent| in the XZ plane,
+// passing through (-R, 0, 0), rotated by the shortest-arc rotation that
+// takes (-1, 0, 0) onto the parent->child direction. The resulting tilt is
+// an artefact of that convention (bodies on the parent's +X side get the
+// biggest tilts), not physical data - but it matches what players see.
+function clientOrbitBasis( u ) {
+    // shortest arc from (-1,0,0) to u: axis (-1,0,0) x u = (0, uz, -uy)
+    var axis = [ 0, u[ 2 ], -u[ 1 ] ];
+    var angle = Math.acos( clamp( -u[ 0 ], -1, 1 ) );
+    var axisLen = v3len( axis );
+    var q;
+    if ( axisLen > 1e-12 ) q = qAxis( v3scale( axis, 1 / axisLen ), angle );
+    else if ( u[ 0 ] < 0 ) q = [ 0, 0, 0, 1 ];         // already (-1,0,0)
+    else q = qAxis( [ 0, 1, 0 ], Math.PI );             // exactly opposite: any perpendicular axis
+    // u = q * (-1,0,0) by construction; v completes the circle's plane
+    return qRot( q, [ 0, 0, 1 ] );
+}
+
+// circle through `child` centred on `parent` (see clientOrbitBasis for the
+// plane). Vertex 0 sits exactly on the child so the line always threads it
 function addRing( verts, count, parent, child, rgb, alpha ) {
     var off = v3sub( child.pos, parent.pos );
     var R = v3len( off );
     if ( R <= 0 ) return count;
     var u = v3scale( off, 1 / R );
-    var n = v3sub( ecliptic, v3scale( u, v3dot( ecliptic, u ) ) );
-    n = v3len( n ) > 1e-6 ? v3norm( n ) : anyPerpendicular( u );
-    var v = v3cross( n, u );
+    var v = clientOrbitBasis( u );
 
     var parentDist = v3len( v3sub( parent.pos, cam.pos ) );
     var ringPx = R / Math.max( parentDist, 1 ) * view.pxPerRad;
