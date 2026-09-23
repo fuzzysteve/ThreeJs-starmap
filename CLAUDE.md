@@ -32,18 +32,21 @@ Chromium works with `--enable-unsafe-webgpu --enable-features=Vulkan --use-angle
 **Depth.** Reversed-Z with an infinite far plane: depth clears to `0`, compares are `greater`/`greater-equal`, near = 1 m. Anything writing depth must follow that convention.
 
 **Passes** (`Renderer.render`, one 4x MSAA target):
+0. *Nebula* (optional) — fullscreen procedural backdrop, no depth; domain-warped noise on the world-space view direction, weighted by the star catalogue's SH (`skyDensity`), palette seeded per region in `applyNebula`.
 1. *Spheres* — ray-traced impostors (star, planets, moons). A camera-facing quad, or a fullscreen quad when within 3 radii, whose fragment shader intersects the ray analytically and writes `frag_depth`. Uses the miss-distance form of ray/sphere intersection because `b*b - c` cancels to garbage in f32. Surface style per `kind` in `shade()`.
 2. *Meshes* — instanced triangle geometry for stations (dodecahedron), stargates (torus, axis pointed at the destination system) and asteroid-belt rocks; one draw per mesh via `firstInstance`. Geometry is built in `gpusystem.js` (`buildDodecahedron`, `buildTorus`, `buildRock`) and must be CCW-outward (back-face culling is on). `pushTri` fixes winding using the centroid, which only works for star-shaped meshes — the torus writes its own winding.
 3. *Lines* — orbit rings (line-list).
 4. *Markers* — screen-space sprites: LOD stand-ins, sun glow, background sky stars, plus an always-on-top overlay pipeline for selection/hover. The vertex shader divides clip by `w` itself: sky stars sit at `w≈1e20`, which breaks perspective-correct interpolation otherwise. Sphere impostor quads scale clip by `1/d` for the same reason.
 
-**Keep these in sync when changing buffer layouts:** the WGSL `Frame` struct ↔ the float offsets written in `Renderer.setFrame` (including SH sky light at 56–64, `skyLight` 68–71, `sunRel` 72–74) ↔ the buffer size in the constructor. Likewise each WGSL instance struct ↔ `SPHERE_FLOATS`/`MARKER_FLOATS`/`MESH_FLOATS`/`LINE_FLOATS` ↔ the `put*`/`write*` writers in `gpusystem.js` (vec3 + f32 pack into 16 bytes).
+**Keep these in sync when changing buffer layouts:** the WGSL `Frame` struct ↔ the float offsets written in `Renderer.setFrame` (including SH sky light at 56–64, `skyLight` 68–71, `sunRel` 72–74, `nebulaA` 76–79, `nebulaB` 80–83) ↔ the buffer size in the constructor. Likewise each WGSL instance struct ↔ `SPHERE_FLOATS`/`MARKER_FLOATS`/`MESH_FLOATS`/`LINE_FLOATS` ↔ the `put*`/`write*` writers in `gpusystem.js` (vec3 + f32 pack into 16 bytes).
 
 **Per-frame flow** (`frame()` in `gpusystem.js`): movement/warp → collisions → `computeView` → `updateLod` → `writeSpheres`/`writeMeshes`/`writeMarkers`/`writeRings` → `setSun`/`setFrame` → `render` → `updateLabels` (DOM label pool with priority-based declutter).
 
 **LOD rules** (constants at the top of `gpusystem.js`): a body gets real geometry once it covers `SPHERE_MIN_PX`; below `MARKER_MAX_PX` it gets a marker only if it is navigational (star, planet, gate) or, for moons/stations/belts, once it is `CHILD_MARKER_SEP_PX` apart from its parent on screen; labels use a stricter separation and are hidden behind nearer bodies; noise octaves scale with on-screen size; ring segment counts scale with projected size; belt rock fields are generated lazily (seeded by belt `itemID`) once the field spans `ROCKFIELD_MIN_PX`, then each rock is culled below `ROCK_MIN_PX`. The status bar shows live LOD counts.
 
 **Sky light.** The background sky is the real k-space catalogue (`gpusystem-data.php?sky=1`). The same catalogue is projected into 9 L2 spherical-harmonic coefficients (`buildSkyLight`) and evaluated per normal (`skyIrradiance` in the shared WGSL) as ambient light on the night side of bodies.
+
+**Ship model.** The optional flyable Rifter loads `models/rifter.json` + `.bin` (Deamos' CC BY 4.0 STL, converted by `tools/stl-to-mesh.py`; the attribution in `models/README.md` and the help panel must stay if the model is kept). The `MSH1` format is documented in the converter. `--axes` must be a proper rotation or the winding flips, and engine positions are hand-placed in STL coordinates because STLs have no parts. `buildRifter()` is the procedural fallback if the files can't be loaded.
 
 **Navigation.** `flyTo` interpolates distance-to-target in log space so any trip takes a few seconds; stargate jumps (`jumpThrough`) load the destination system in-page, place the camera at the matching arrival gate (`dest.gateId`) and `pushState` the URL.
 

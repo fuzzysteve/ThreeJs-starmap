@@ -15,7 +15,8 @@
 // depth. That gives a perfect silhouette at any scale - no tessellation
 // LOD to pop between, and no faceting when skimming a planet's surface.
 //
-// Four passes, all into one 4x MSAA target:
+// Five passes, all into one 4x MSAA target:
+//   nebula   - optional procedural backdrop, fullscreen, no depth
 //   spheres  - opaque impostors, writes depth, alpha-to-coverage edges
 //   meshes   - real triangle geometry for small objects (station
 //              dodecahedra, asteroid-belt rocks), instanced per mesh
@@ -28,7 +29,7 @@ export const SPHERE_FLOATS = 16;
 export const MARKER_FLOATS = 12;
 export const LINE_FLOATS = 8;
 export const MESH_FLOATS = 16;
-export const MESH_STYLE = { ROCK: 0, STATION: 1, GATE: 2 };
+export const MESH_STYLE = { ROCK: 0, STATION: 1, GATE: 2, SHIP: 3, ENGINE: 4 };
 // stargate torus proportions (circumradius 1); the shader needs the major
 // radius to tell the inner rim from the outer
 export const GATE_RING = { major: 0.86, minor: 0.14 };
@@ -49,6 +50,8 @@ struct Frame {
     sh2 : vec4f,        // normalised so the sphere-average irradiance is 1
     skyLight : vec4f,   // rgb tint * strength, w = ambient floor
     sunRel : vec4f,     // star centre, camera-relative, world axes
+    nebulaA : vec4f,    // nebula colour 1, w = intensity (0 = off)
+    nebulaB : vec4f,    // nebula colour 2, w = pattern seed
 };
 @group(0) @binding(0) var<uniform> frame : Frame;
 
@@ -56,6 +59,13 @@ struct Frame {
 // on a surface facing n. Star-dense directions (the galactic band) come
 // out brighter than empty sky, so the night side isn't uniformly flat
 fn skyIrradiance(n : vec3f) -> vec3f {
+    let floorLevel = frame.skyLight.w;
+    return frame.skyLight.rgb * (floorLevel + (1.0 - floorLevel) * max(skyDensity(n), 0.0));
+}
+
+// the star catalogue's SH evaluated as a scalar: ~1 on average, higher
+// toward the galactic band
+fn skyDensity(n : vec3f) -> f32 {
     let c1 = 0.429043; let c2 = 0.511664; let c3 = 0.743125; let c4 = 0.886227; let c5 = 0.247708;
     let L00 = frame.sh0.x; let L1m1 = frame.sh0.y; let L10 = frame.sh0.z; let L11 = frame.sh0.w;
     let L2m2 = frame.sh1.x; let L2m1 = frame.sh1.y; let L20 = frame.sh1.z; let L21 = frame.sh1.w;
@@ -63,8 +73,7 @@ fn skyIrradiance(n : vec3f) -> vec3f {
     let e = c1 * L22 * (n.x * n.x - n.y * n.y) + c3 * L20 * n.z * n.z + c4 * L00 - c5 * L20
         + 2.0 * c1 * (L2m2 * n.x * n.y + L21 * n.x * n.z + L2m1 * n.y * n.z)
         + 2.0 * c2 * (L11 * n.x + L1m1 * n.y + L10 * n.z);
-    let floorLevel = frame.skyLight.w;
-    return frame.skyLight.rgb * (floorLevel + (1.0 - floorLevel) * max(e, 0.0));
+    return e;
 }
 
 fn hash3(p : vec3f) -> f32 {
@@ -418,7 +427,8 @@ struct MeshInst {
     stretch : vec3f,    // per-axis squash, applied before rotation
     seed : f32,
     color : vec3f,
-    style : f32,        // 0 rock, 1 station, 2 stargate (color = glow tint)
+    style : f32,        // 0 rock, 1 station, 2 stargate (color = glow tint),
+                        // 3 ship hull, 4 engine nozzle (color = glow, seed = thrust)
 };
 @group(1) @binding(0) var<storage, read> meshes : array<MeshInst>;
 
@@ -459,9 +469,25 @@ fn fs(in : VOut) -> @location(0) vec4f {
     let sunCos = dot(n, sunDir);
     let lambert = max(sunCos, 0.0);
 
+    if (m.style > 3.5) {
+        // engine nozzle: unlit, brightens with thrust
+        let glow = m.color * (0.3 + 1.7 * m.seed);
+        return vec4f(vec3f(1.0) - exp(-glow * 1.6), 1.0);
+    }
+
     var albedo : vec3f;
     var emissive = vec3f(0.0);
-    if (m.style > 1.5) {
+    var spec = 0.0;
+    if (m.style > 2.5) {
+        // ship hull: Minmatar rust - mismatched plates, streaky wear, a
+        // little metallic sheen
+        let plate = hash3(floor(in.obj * vec3f(9.0, 7.0, 12.0)));
+        let wear = fbm(in.obj * vec3f(3.0, 3.0, 9.0), 4);
+        albedo = m.color * (0.6 + 0.45 * plate) * (0.75 + 0.5 * wear);
+        albedo = mix(albedo, vec3f(0.22, 0.2, 0.19), step(0.82, plate) * 0.7);
+        let viewDir = -normalize(in.world);
+        spec = pow(max(dot(reflect(-sunDir, n), viewDir), 0.0), 20.0) * 0.35 * step(0.0, sunCos);
+    } else if (m.style > 1.5) {
         // stargate ring: banded metal, the inner rim lit in the colour of
         // the destination's security, running lights round the outer edge
         let major = 0.86;
@@ -490,8 +516,53 @@ fn fs(in : VOut) -> @location(0) vec4f {
         albedo = m.color * (0.55 + 0.6 * h + 0.2 * fine);
     }
 
-    var col = albedo * (lambert * 1.1 + skyIrradiance(n)) + emissive;
+    var col = albedo * (lambert * 1.1 + skyIrradiance(n)) + emissive + vec3f(spec);
     col = vec3f(1.0) - exp(-col * 1.6);
+    return vec4f(col, 1.0);
+}
+`;
+
+// Procedural nebula backdrop: each pixel's world-space view direction is
+// fed through domain-warped 3D noise - soft clouds, brighter ridged
+// filaments and darker dust lanes - weighted toward the galactic band via
+// the star catalogue's SH so it sits where the background stars crowd
+const NEBULA_WGSL = COMMON_WGSL + /* wgsl */`
+struct VOut {
+    @builtin(position) pos : vec4f,
+    @location(0) ray : vec3f,
+};
+
+@vertex
+fn vs(@builtin(vertex_index) vi : u32) -> VOut {
+    // one oversized triangle covering the screen
+    var corners = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
+    let c = corners[vi];
+    var out : VOut;
+    out.pos = vec4f(c, 0.0, 1.0);
+    out.ray = vec3f(c.x * frame.params.x * frame.params.y, c.y * frame.params.x, -1.0);
+    return out;
+}
+
+@fragment
+fn fs(in : VOut) -> @location(0) vec4f {
+    let d = normalize((frame.invViewRot * vec4f(normalize(in.ray), 0.0)).xyz);
+    let seed = frame.nebulaB.w;
+    let p = d * 2.1 + vec3f(seed * 1.7, seed * 2.3, seed * 0.9);
+
+    // domain warp: offset the lookup by another noise field for swirls
+    let q = vec3f(fbm(p, 4), fbm(p + vec3f(5.2, 1.3, 2.8), 4), fbm(p + vec3f(9.1, 4.7, 7.3), 4));
+    let cloud = fbm(p * 1.3 + q * 2.4, 6);
+    let density = smoothstep(0.42, 0.85, cloud);
+    // ridged filaments along the cloud structure
+    let ridge = 1.0 - abs(2.0 * fbm(p * 2.6 + q * 3.0, 5) - 1.0);
+    let filaments = pow(ridge, 6.0) * smoothstep(0.35, 0.7, cloud);
+    // dark dust lanes cutting through
+    let dust = smoothstep(0.55, 0.75, fbm(p * 3.1 - q * 1.7, 4));
+
+    let band = clamp(skyDensity(d), 0.25, 2.5);
+    let tint = mix(frame.nebulaA.rgb, frame.nebulaB.rgb, smoothstep(0.3, 0.7, fbm(p * 0.8 + q.yzx, 3)));
+    var col = tint * (density * 0.55 + filaments * 0.9) * (1.0 - dust * 0.75) * band * frame.nebulaA.w;
+    col += vec3f(0.004, 0.005, 0.012);   // same as the clear colour underneath
     return vec4f(col, 1.0);
 }
 `;
@@ -589,11 +660,12 @@ export class Renderer {
         } );
 
         this.frameBuffer = device.createBuffer( {
-            size: 4 * ( 16 * 3 + 28 ),
+            size: 4 * ( 16 * 3 + 36 ),
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
         } );
-        this.frameData = new Float32Array( 16 * 3 + 28 );
+        this.frameData = new Float32Array( 16 * 3 + 36 );
         this.sunRel = [ 0, 0, 0 ];
+        this.nebula = { a: [ 0, 0, 0 ], b: [ 0, 0, 0 ], intensity: 0, seed: 0 };
         // flat sky until the caller supplies a real one
         this.skySH = new Float32Array( [ 1 / 0.886227, 0, 0, 0, 0, 0, 0, 0, 0 ] );
         this.skyLight = [ 0.1, 0.11, 0.14, 1 ];
@@ -616,6 +688,17 @@ export class Renderer {
         var markerModule = device.createShaderModule( { label: 'markers', code: MARKER_WGSL } );
         var lineModule = device.createShaderModule( { label: 'lines', code: LINE_WGSL } );
         var meshModule = device.createShaderModule( { label: 'meshes', code: MESH_WGSL } );
+        var nebulaModule = device.createShaderModule( { label: 'nebula', code: NEBULA_WGSL } );
+
+        this.nebulaPipeline = device.createRenderPipeline( {
+            label: 'nebula',
+            layout: frameOnlyLayout,
+            vertex: { module: nebulaModule, entryPoint: 'vs' },
+            fragment: { module: nebulaModule, entryPoint: 'fs', targets: [ { format: this.format } ] },
+            primitive: { topology: 'triangle-list' },
+            depthStencil: { format: 'depth32float', depthWriteEnabled: false, depthCompare: 'always' },
+            multisample: { count: SAMPLES }
+        } );
 
         this.spherePipeline = device.createRenderPipeline( {
             label: 'spheres',
@@ -769,6 +852,10 @@ export class Renderer {
         f[ 72 ] = this.sunRel[ 0 ];
         f[ 73 ] = this.sunRel[ 1 ];
         f[ 74 ] = this.sunRel[ 2 ];
+        f[ 76 ] = this.nebula.a[ 0 ]; f[ 77 ] = this.nebula.a[ 1 ]; f[ 78 ] = this.nebula.a[ 2 ];
+        f[ 79 ] = this.nebula.intensity;
+        f[ 80 ] = this.nebula.b[ 0 ]; f[ 81 ] = this.nebula.b[ 1 ]; f[ 82 ] = this.nebula.b[ 2 ];
+        f[ 83 ] = this.nebula.seed;
         this.device.queue.writeBuffer( this.frameBuffer, 0, f );
     }
 
@@ -785,6 +872,10 @@ export class Renderer {
 
     // star position relative to the camera, for lighting meshes
     setSun( rel ) { this.sunRel = rel; }
+
+    // two colours to blend, overall brightness (0 turns the pass off) and
+    // a pattern seed (keep it small - it offsets the noise lookup)
+    setNebula( a, b, intensity, seed ) { this.nebula = { a: a, b: b, intensity: intensity, seed: seed }; }
 
     // vertices: interleaved position.xyz, normal.xyz, triangle-list with
     // counter-clockwise outward winding
@@ -834,6 +925,11 @@ export class Renderer {
         } );
 
         pass.setBindGroup( 0, this.frameBindGroup );
+
+        if ( this.nebula.intensity > 0 ) {
+            pass.setPipeline( this.nebulaPipeline );
+            pass.draw( 3 );
+        }
 
         if ( this.spheres.count > 0 ) {
             pass.setPipeline( this.spherePipeline );

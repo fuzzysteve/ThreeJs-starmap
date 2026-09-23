@@ -42,6 +42,16 @@ var ROCKFIELD_MIN_PX = 6;       // a belt's rock field is generated/drawn once i
 var ROCK_MIN_PX = 0.75;         // an individual rock below this is dropped
 var ROCK_VARIANTS = 4;
 
+// the flyable Rifter: SDE radius (types.jsonl, typeID 587). CCP's model is
+// a client resource; the mesh is Deamos' CC BY Rifter STL converted by
+// tools/stl-to-mesh.py (models/rifter.json + .bin), with the procedural
+// buildRifter() as a fallback if that can't be loaded
+var SHIP_MODEL_URL = 'models/rifter.json';
+var SHIP_RADIUS = 31;
+var SHIP_OFFSET = [ 0, -1.1 * SHIP_RADIUS, -4.2 * SHIP_RADIUS ];   // camera-local: below and ahead
+var SHIP_HULL_COLOR = [ 0.4, 0.31, 0.25 ];    // gunmetal brown, rust in the plating
+var SHIP_GLOW_COLOR = [ 1.0, 0.55, 0.25 ];
+
 // the SDE has no radius for stations or stargates - these are display
 // sizes only, and the UI says so wherever it shows them
 var NOMINAL_RADIUS = { station: 10000, gate: 5000 };
@@ -350,6 +360,322 @@ function buildTorus( major, minor, segU, segV ) {
     return new Float32Array( out );
 }
 
+// flat-shaded triangle facing away from `inside` - for convex parts
+function pushTriAway( out, a, b, c, inside ) {
+    var n = v3cross( v3sub( b, a ), v3sub( c, a ) );
+    var centroid = v3scale( v3add( v3add( a, b ), c ), 1 / 3 );
+    if ( v3dot( n, v3sub( centroid, inside ) ) < 0 ) {
+        var t = b; b = c; c = t;
+        n = v3scale( n, -1 );
+    }
+    n = v3norm( n );
+    [ a, b, c ].forEach( function ( v ) { out.push( v[ 0 ], v[ 1 ], v[ 2 ], n[ 0 ], n[ 1 ], n[ 2 ] ); } );
+}
+
+function pushQuadAway( out, a, b, c, d, inside ) {
+    pushTriAway( out, a, b, c, inside );
+    pushTriAway( out, a, c, d, inside );
+}
+
+// thin plate through the quad a-b-c-d, `t` thick
+function addSlab( out, a, b, c, d, t ) {
+    var n = v3scale( v3norm( v3cross( v3sub( b, a ), v3sub( d, a ) ) ), t / 2 );
+    var top = [ a, b, c, d ].map( function ( p ) { return v3add( p, n ); } );
+    var bot = [ a, b, c, d ].map( function ( p ) { return v3sub( p, n ); } );
+    var centre = v3scale( v3add( v3add( a, b ), v3add( c, d ) ), 0.25 );
+    pushQuadAway( out, top[ 0 ], top[ 1 ], top[ 2 ], top[ 3 ], centre );
+    pushQuadAway( out, bot[ 0 ], bot[ 1 ], bot[ 2 ], bot[ 3 ], centre );
+    for ( var i = 0; i < 4; i++ ) {
+        var j = ( i + 1 ) % 4;
+        pushQuadAway( out, top[ i ], top[ j ], bot[ j ], bot[ i ], centre );
+    }
+}
+
+// box between two points, `w` wide and `h` tall (for beams, struts, rods)
+function addBeam( out, a, b, w, h ) {
+    var d = v3norm( v3sub( b, a ) );
+    var side = v3norm( v3cross( d, Math.abs( d[ 1 ] ) > 0.9 ? [ 1, 0, 0 ] : [ 0, 1, 0 ] ) );
+    var up = v3cross( side, d );
+    var corner = function ( p, sx, sy ) { return v3add( p, v3add( v3scale( side, sx * w / 2 ), v3scale( up, sy * h / 2 ) ) ); };
+    var A = [ corner( a, -1, -1 ), corner( a, 1, -1 ), corner( a, 1, 1 ), corner( a, -1, 1 ) ];
+    var B = [ corner( b, -1, -1 ), corner( b, 1, -1 ), corner( b, 1, 1 ), corner( b, -1, 1 ) ];
+    var centre = v3scale( v3add( a, b ), 0.5 );
+    for ( var i = 0; i < 4; i++ ) {
+        var j = ( i + 1 ) % 4;
+        pushQuadAway( out, A[ i ], A[ j ], B[ j ], B[ i ], centre );
+    }
+    pushQuadAway( out, A[ 0 ], A[ 1 ], A[ 2 ], A[ 3 ], centre );
+    pushQuadAway( out, B[ 0 ], B[ 1 ], B[ 2 ], B[ 3 ], centre );
+}
+
+// axis-aligned box from its centre and half-extents
+function addBox( out, c, hx, hy, hz ) {
+    addBeam( out, [ c[ 0 ], c[ 1 ], c[ 2 ] - hz ], [ c[ 0 ], c[ 1 ], c[ 2 ] + hz ], hx * 2, hy * 2 );
+}
+
+// rounded-rectangle cross-section, `per` extra points on each corner arc
+function roundedRect( hw, hh, r, per ) {
+    var pts = [];
+    var corners = [ [ hw - r, hh - r, 0 ], [ -hw + r, hh - r, 1 ], [ -hw + r, -hh + r, 2 ], [ hw - r, -hh + r, 3 ] ];
+    corners.forEach( function ( c ) {
+        for ( var i = 0; i <= per; i++ ) {
+            var a = ( c[ 2 ] + i / per ) * Math.PI / 2;
+            pts.push( [ c[ 0 ] + Math.cos( a ) * r, c[ 1 ] + Math.sin( a ) * r ] );
+        }
+    } );
+    return pts;
+}
+
+// skin a list of same-sized convex rings (each ring's points share one z,
+// or are close to it), capping both ends with fans
+function addLoft( out, rings, capStart, capEnd ) {
+    var centreOf = function ( r ) {
+        return r.reduce( function ( acc, p ) { return v3add( acc, v3scale( p, 1 / r.length ) ); }, [ 0, 0, 0 ] );
+    };
+    var n = rings[ 0 ].length;
+    for ( var i = 0; i < rings.length - 1; i++ ) {
+        var mid = v3scale( v3add( centreOf( rings[ i ] ), centreOf( rings[ i + 1 ] ) ), 0.5 );
+        for ( var k = 0; k < n; k++ ) {
+            var k2 = ( k + 1 ) % n;
+            pushQuadAway( out, rings[ i ][ k ], rings[ i ][ k2 ], rings[ i + 1 ][ k2 ], rings[ i + 1 ][ k ], mid );
+        }
+    }
+    [ [ 0, capStart, 1 ], [ rings.length - 1, capEnd, -1 ] ].forEach( function ( e ) {
+        if ( !e[ 1 ] ) return;
+        var r = rings[ e[ 0 ] ], c = centreOf( r );
+        var inward = v3norm( v3sub( centreOf( rings[ e[ 0 ] + e[ 2 ] ] ), c ) );
+        for ( var k = 0; k < n; k++ ) pushTriAway( out, c, r[ k ], r[ ( k + 1 ) % n ], v3add( c, inward ) );
+    } );
+}
+
+// box along z with every edge chamfered - reads as machined plating
+function addChamferBox( out, c, hx, hy, hz, ch ) {
+    var ring = function ( z, shrink ) {
+        return roundedRect( hx - shrink, hy - shrink, Math.max( ch - shrink, 0.05 ), 1 ).map( function ( p ) {
+            return [ c[ 0 ] + p[ 0 ], c[ 1 ] + p[ 1 ], z ];
+        } );
+    };
+    addLoft( out, [ ring( c[ 2 ] - hz, ch * 0.7 ), ring( c[ 2 ] - hz + ch, 0 ), ring( c[ 2 ] + hz - ch, 0 ), ring( c[ 2 ] + hz, ch * 0.7 ) ], true, true );
+}
+
+// tapered spike from base to tip
+function addSpire( out, base, tip, r, segs ) {
+    var d = v3norm( v3sub( tip, base ) );
+    var side = v3norm( v3cross( d, Math.abs( d[ 1 ] ) > 0.9 ? [ 1, 0, 0 ] : [ 0, 1, 0 ] ) );
+    var up = v3cross( side, d );
+    var centre = v3add( base, v3scale( v3sub( tip, base ), 0.3 ) );
+    var ring = [];
+    for ( var i = 0; i < segs; i++ ) {
+        var a = i / segs * Math.PI * 2;
+        ring.push( v3add( base, v3add( v3scale( side, Math.cos( a ) * r ), v3scale( up, Math.sin( a ) * r ) ) ) );
+    }
+    for ( var k = 0; k < segs; k++ ) {
+        var k2 = ( k + 1 ) % segs;
+        pushTriAway( out, ring[ k ], ring[ k2 ], tip, centre );
+        pushTriAway( out, base, ring[ k2 ], ring[ k ], v3add( base, v3scale( d, 0.1 ) ) );
+    }
+}
+
+// ladder truss between two points: twin rails and rungs
+function addTruss( out, a, b, width, rungs ) {
+    var d = v3norm( v3sub( b, a ) );
+    var side = v3scale( v3norm( v3cross( d, [ 0, 0, 1 ] ) ), width / 2 );
+    addBeam( out, v3add( a, side ), v3add( b, side ), 0.35, 0.35 );
+    addBeam( out, v3sub( a, side ), v3sub( b, side ), 0.35, 0.35 );
+    for ( var i = 1; i < rungs; i++ ) {
+        var p = v3add( a, v3scale( v3sub( b, a ), i / rungs ) );
+        addBeam( out, v3sub( p, side ), v3add( p, side ), 0.25, 0.25 );
+    }
+}
+
+// engine bell facing +z: outer shell, lip, and a recessed glowing disc
+// written to `glow` (drawn emissive)
+function addEngine( out, glow, c, r, z0, z1, segs ) {
+    var ring = function ( rad, z ) {
+        var pts = [];
+        for ( var i = 0; i < segs; i++ ) {
+            var a = i / segs * Math.PI * 2;
+            pts.push( [ c[ 0 ] + Math.cos( a ) * rad, c[ 1 ] + Math.sin( a ) * rad, z ] );
+        }
+        return pts;
+    };
+    addLoft( out, [ ring( r * 0.8, z0 ), ring( r, z0 + ( z1 - z0 ) * 0.3 ), ring( r * 1.08, z1 ) ], true, false );
+    // inner wall of the bell, facing inward, down to the glowing disc
+    var lipOuter = ring( r * 1.08, z1 ), lipInner = ring( r * 0.85, z1 ), inner = ring( r * 0.8, z1 - r * 0.5 );
+    var axisBack = [ c[ 0 ], c[ 1 ], z1 + 10 ];
+    for ( var k = 0; k < segs; k++ ) {
+        var k2 = ( k + 1 ) % segs;
+        pushQuadAway( out, lipOuter[ k ], lipOuter[ k2 ], lipInner[ k2 ], lipInner[ k ], [ c[ 0 ], c[ 1 ], z1 - 1 ] );
+        // inner wall normals point toward the axis
+        var mid = v3scale( v3add( lipInner[ k ], inner[ k2 ] ), 0.5 );
+        var towardAxis = v3add( mid, v3scale( v3norm( v3sub( mid, [ c[ 0 ], c[ 1 ], mid[ 2 ] ] ) ), 1 ) );
+        pushQuadAway( out, lipInner[ k ], lipInner[ k2 ], inner[ k2 ], inner[ k ], towardAxis );
+        pushTriAway( glow, [ c[ 0 ], c[ 1 ], z1 - r * 0.5 ], inner[ k ], inner[ k2 ], [ c[ 0 ], c[ 1 ], z1 - r * 0.5 - 1 ] );
+    }
+    return axisBack;
+}
+
+// one of the two main pods: a narrow neck running forward from the stern,
+// flaring into a long, rib-segmented prow that tapers to a slanted scoop
+function addPod( out, xc ) {
+    // z, half-width, half-height, centre height
+    var sections = [ [ 9, 2.3, 2.5, 0 ], [ 2, 2.1, 2.7, 0.2 ], [ -8, 2.0, 2.8, 0.4 ], [ -13, 2.3, 3.0, 0.4 ] ];
+    // the prow: alternating plate/rib rings give the segmented look
+    for ( var z = -15, i = 0; z >= -37; z -= 1.6, i++ ) {
+        var t = ( -15 - z ) / 22;
+        var hw = 3.1 + 1.0 * Math.sin( Math.min( t * 1.4, 1 ) * Math.PI / 2 ) - 1.0 * Math.max( t - 0.75, 0 ) * 4;
+        var hh = 3.8 + 1.4 * Math.sin( Math.min( t * 1.4, 1 ) * Math.PI / 2 ) - 1.2 * Math.max( t - 0.75, 0 ) * 4;
+        var rib = i % 2 === 0 ? 1.0 : 1.05;
+        sections.push( [ z, hw * rib, hh * rib, -0.3 - t * 1.2 ] );
+    }
+    var last = sections.length - 1;
+    var rings = sections.map( function ( s, idx ) {
+        return roundedRect( s[ 1 ], s[ 2 ], Math.min( s[ 1 ], s[ 2 ] ) * 0.35, 2 ).map( function ( p ) {
+            var zz = s[ 0 ];
+            // slanted scoop face on the very front: bottom lip reaches further
+            if ( idx === last ) zz -= ( 1 - ( p[ 1 ] + s[ 2 ] ) / ( 2 * s[ 2 ] ) ) * 6;
+            return [ xc + p[ 0 ], s[ 3 ] + p[ 1 ], zz ];
+        } );
+    } );
+    addLoft( out, rings, true, true );
+    // small outboard fin at the neck
+    var sgn = xc < 0 ? -1 : 1;
+    addSlab( out, [ xc + sgn * 2.0, 0.8, -6 ], [ xc + sgn * 2.0, 0.8, -12 ], [ xc + sgn * 5.5, 2.8, -11 ], [ xc + sgn * 5.5, 2.8, -7.5 ], 0.35 );
+}
+
+// Rifter rebuilt after its in-game renders (nose toward -Z, +Y up): two
+// long pods (narrow neck, segmented prow, slanted scoop front) ahead of a
+// wide stern beam carrying five engine modules, forward-raking spires at
+// both ends, lattice trusses hanging below, and a central spine tower.
+// Returns the hull, the glowing engine discs (a separate mesh drawn
+// emissive) and the nozzles, recentred and scaled to circumradius 1
+function buildRifter() {
+    var hull = [], engines = [], nozzles = [];
+    var podX = 5.8;
+
+    addPod( hull, -podX );
+    addPod( hull, podX );
+
+    // stern beam
+    addChamferBox( hull, [ 1, 0.5, 7 ], 27, 1.6, 2.2, 0.5 );
+    // central spine and tower, with a pointed cap
+    addChamferBox( hull, [ 0, 1.2, -2 ], 1.6, 2.0, 11, 0.4 );
+    addChamferBox( hull, [ 0, 2.2, 6 ], 2.6, 3.6, 3.4, 0.5 );
+    addSpire( hull, [ 0, 5.6, 6 ], [ 0, 9.5, 3 ], 1.6, 8 );
+    // engine modules along the beam: x, half-width, half-height, engine radius
+    var modules = [ [ -21, 2.8, 4.2, 1.7 ], [ -11, 3.2, 3.2, 1.9 ], [ 11, 3.2, 3.2, 1.9 ], [ 22, 2.8, 4.4, 1.7 ] ];
+    modules.forEach( function ( m ) {
+        addChamferBox( hull, [ m[ 0 ], 0.2, 6.5 ], m[ 1 ], m[ 2 ], 3.6, 0.6 );
+        addChamferBox( hull, [ m[ 0 ], m[ 2 ] + 0.6, 5 ], m[ 1 ] * 0.6, 0.9, 2, 0.3 );   // top detail
+        addEngine( hull, engines, [ m[ 0 ], -0.4, 0 ], m[ 3 ], 9.5, 12.5, 16 );
+        nozzles.push( { pos: [ m[ 0 ], -0.4, 12.5 - m[ 3 ] * 0.5 ], radius: m[ 3 ] } );
+    } );
+    addEngine( hull, engines, [ 0, 0.6, 0 ], 2.3, 9.4, 13, 16 );
+    nozzles.push( { pos: [ 0, 0.6, 13 - 2.3 * 0.5 ], radius: 2.3 } );
+
+    // forward-raking spires at the beam ends
+    addSpire( hull, [ -24.5, 3, 5 ], [ -29, 13, -24 ], 0.9, 8 );
+    addSpire( hull, [ -22, 3.5, 4 ], [ -24.5, 11, -16 ], 0.6, 8 );
+    addSpire( hull, [ 25, 3, 5 ], [ 31, 12, -26 ], 0.9, 8 );
+    addSpire( hull, [ 22.5, 4, 4 ], [ 25, 12, -12 ], 0.6, 8 );
+    // lattice trusses hanging below the end modules and the centre
+    addTruss( hull, [ -22, -4, 7 ], [ -23.5, -15, 9 ], 1.6, 8 );
+    addTruss( hull, [ 23, -4, 7 ], [ 25, -14, 9 ], 1.6, 8 );
+    addTruss( hull, [ -4, -1.5, 6 ], [ -4.5, -9, 8 ], 1.2, 5 );
+    addTruss( hull, [ 4.5, -1.5, 6 ], [ 5, -10, 8 ], 1.2, 5 );
+    // struts tying the pods' necks to the beam
+    addBeam( hull, [ -podX, 0.5, 3 ], [ -podX, 0.5, 7 ], 3.2, 2.6 );
+    addBeam( hull, [ podX, 0.5, 3 ], [ podX, 0.5, 7 ], 3.2, 2.6 );
+
+    // recentre on the bounding box, then scale to circumradius 1
+    var lo = [ Infinity, Infinity, Infinity ], hi = [ -Infinity, -Infinity, -Infinity ];
+    [ hull, engines ].forEach( function ( arr ) {
+        for ( var v = 0; v < arr.length; v += 6 ) {
+            for ( var a = 0; a < 3; a++ ) { lo[ a ] = Math.min( lo[ a ], arr[ v + a ] ); hi[ a ] = Math.max( hi[ a ], arr[ v + a ] ); }
+        }
+    } );
+    var centre = v3scale( v3add( lo, hi ), 0.5 );
+    var maxR = 0;
+    [ hull, engines ].forEach( function ( arr ) {
+        for ( var v = 0; v < arr.length; v += 6 ) {
+            for ( var a = 0; a < 3; a++ ) arr[ v + a ] -= centre[ a ];
+            maxR = Math.max( maxR, Math.hypot( arr[ v ], arr[ v + 1 ], arr[ v + 2 ] ) );
+        }
+    } );
+    var scale = function ( arr ) {
+        for ( var v = 0; v < arr.length; v += 6 ) { arr[ v ] /= maxR; arr[ v + 1 ] /= maxR; arr[ v + 2 ] /= maxR; }
+        return new Float32Array( arr );
+    };
+    return {
+        hull: scale( hull ),
+        engines: scale( engines ),
+        nozzles: nozzles.map( function ( nz ) {
+            return { pos: v3scale( v3sub( nz.pos, centre ), 1 / maxR ), radius: nz.radius / maxR };
+        } ),
+        triangles: ( hull.length + engines.length ) / 18
+    };
+}
+
+// Decode a models/*.bin written by tools/stl-to-mesh.py into flat-shaded
+// triangles (interleaved position + normal, circumradius 1)
+function decodeMeshAsset( buf ) {
+    var dv = new DataView( buf );
+    if ( String.fromCharCode( dv.getUint8( 0 ), dv.getUint8( 1 ), dv.getUint8( 2 ), dv.getUint8( 3 ) ) !== 'MSH1' ) {
+        throw new Error( 'not an MSH1 mesh' );
+    }
+    var vc = dv.getUint32( 4, true ), ic = dv.getUint32( 8, true );
+    var pos = new Int16Array( buf, 12, vc * 3 );
+    var idxStart = 12 + Math.ceil( vc * 6 / 4 ) * 4;
+    var idx = vc > 65535 ? new Uint32Array( buf, idxStart, ic ) : new Uint16Array( buf, idxStart, ic );
+    var out = new Float32Array( ic * 6 );
+    var P = function ( i ) { return [ pos[ i * 3 ] / 32767, pos[ i * 3 + 1 ] / 32767, pos[ i * 3 + 2 ] / 32767 ]; };
+    for ( var t = 0; t < ic; t += 3 ) {
+        var a = P( idx[ t ] ), b = P( idx[ t + 1 ] ), c = P( idx[ t + 2 ] );
+        // STL winding is counter-clockwise from outside, so no flip needed
+        var n = v3norm( v3cross( v3sub( b, a ), v3sub( c, a ) ) );
+        [ a, b, c ].forEach( function ( v, k ) {
+            var o = ( t + k ) * 6;
+            out[ o ] = v[ 0 ]; out[ o + 1 ] = v[ 1 ]; out[ o + 2 ] = v[ 2 ];
+            out[ o + 3 ] = n[ 0 ]; out[ o + 4 ] = n[ 1 ]; out[ o + 5 ] = n[ 2 ];
+        } );
+    }
+    return out;
+}
+
+// glowing discs facing +Z (backwards) at each engine, for models that
+// have no nozzle geometry of their own
+function buildEngineDiscs( engines ) {
+    var out = [];
+    engines.forEach( function ( e ) {
+        var c = v3add( e.pos, [ 0, 0, 0.004 ] ), segs = 16;
+        for ( var k = 0; k < segs; k++ ) {
+            var a0 = k / segs * Math.PI * 2, a1 = ( k + 1 ) / segs * Math.PI * 2;
+            pushTriAway( out, c,
+                v3add( c, [ Math.cos( a0 ) * e.radius, Math.sin( a0 ) * e.radius, 0 ] ),
+                v3add( c, [ Math.cos( a1 ) * e.radius, Math.sin( a1 ) * e.radius, 0 ] ),
+                v3sub( c, [ 0, 0, 1 ] ) );
+        }
+    } );
+    return new Float32Array( out );
+}
+
+function loadShipModel() {
+    return fetchJson( SHIP_MODEL_URL ).then( function ( meta ) {
+        var binUrl = SHIP_MODEL_URL.replace( /[^/]*$/, '' ) + meta.mesh;
+        return fetch( binUrl ).then( function ( r ) {
+            if ( !r.ok ) throw new Error( 'HTTP ' + r.status + ' loading ' + binUrl );
+            return r.arrayBuffer();
+        } ).then( function ( buf ) {
+            var hull = decodeMeshAsset( buf );
+            meshes.ship = renderer.createMesh( hull, 'rifter hull (model)' );
+            meshes.shipEngines = renderer.createMesh( buildEngineDiscs( meta.engines ), 'rifter engines (model)' );
+            rifter = { nozzles: meta.engines, triangles: meta.triangles, credit: meta.credit };
+        } );
+    } ).catch( function ( err ) {
+        console.warn( 'Rifter model unavailable, using the procedural one', err );
+    } );
+}
+
 var ROCK_TONES = [ [ 0.46, 0.41, 0.35 ], [ 0.38, 0.37, 0.36 ], [ 0.52, 0.43, 0.32 ], [ 0.42, 0.44, 0.48 ], [ 0.33, 0.29, 0.26 ] ];
 
 // Procedural rock field for an asteroid belt - the SDE gives a belt a
@@ -398,7 +724,7 @@ function beltField( b ) {
 var el = {};
 [ 'viewport', 'labels', 'systemName', 'systemSec', 'systemLinks', 'tree', 'treeFilter', 'info',
     'status', 'lodStats', 'fps', 'fade', 'loading', 'search', 'searchResults', 'helpPanel',
-    'toggleOrbits', 'toggleLabels', 'toggleSky', 'skyLight', 'sidebar' ].forEach( function ( id ) {
+    'toggleOrbits', 'toggleLabels', 'toggleSky', 'toggleNebula', 'toggleShip', 'skyLight', 'sidebar' ].forEach( function ( id ) {
     el[ id ] = document.getElementById( id );
 } );
 
@@ -424,7 +750,7 @@ var hovered = null;
 var flight = null;
 var keys = {};
 var pointer = { x: -1, y: -1, down: false, button: 0, startX: 0, startY: 0, lastX: 0, lastY: 0, dragged: false };
-var settings = { orbits: true, labels: true, sky: true, skyLight: 1 };
+var settings = { orbits: true, labels: true, sky: true, skyLight: 1, ship: false, nebula: true };
 var loadToken = 0;
 
 var view = { w: 1, h: 1, dpr: 1, pxPerRad: 1, right: [ 1, 0, 0 ], up: [ 0, 1, 0 ], fwd: [ 0, 0, -1 ] };
@@ -434,7 +760,11 @@ var markerData = new Float32Array( MARKER_FLOATS * 512 );
 var overlayData = new Float32Array( MARKER_FLOATS * 8 );
 var lineData = new Float32Array( LINE_FLOATS * 8192 );
 var meshData = new Float32Array( MESH_FLOATS * 1024 );
-var meshes = null;              // { station, rocks: [] } GPU vertex buffers
+var meshes = null;              // { station, gate, rocks: [], ship, shipEngines } GPU vertex buffers
+var rifter = null;              // buildRifter() output (nozzle positions)
+// the flyable ship rides rigidly in front of the camera, with a little lag
+// and banking so turns read as the ship flying rather than the view panning
+var ship = { q: [ 0, 0, 0, 1 ], rel: [ 0, 0, 0 ], bank: 0, pitch: 0, slide: 0, thrust: 0, prevQ: null };
 
 var labelPool = [];
 var labelRects = [];
@@ -619,10 +949,43 @@ function buildSkyLight() {
     applySkyLight();
 }
 
+// Per-region nebula palette: two hues seeded by the region ID, so every
+// system in a region shares a look, as regions do in game (the real
+// backdrops are client art, not SDE data)
+var NEBULA_INTENSITY = 0.35;
+var nebulaPalette = null;
+
+function hsvToRgb( h, s, v ) {
+    var i = Math.floor( h * 6 ), f = h * 6 - i;
+    var p = v * ( 1 - s ), q = v * ( 1 - f * s ), t = v * ( 1 - ( 1 - f ) * s );
+    return [ [ v, t, p ], [ q, v, p ], [ p, v, t ], [ p, q, v ], [ t, p, v ], [ v, p, q ] ][ i % 6 ];
+}
+
+function applyNebula() {
+    if ( !renderer || !sys ) return;
+    var rng = mulberry32( sys.regionId * 7 + 3 );
+    var h1 = rng();
+    var h2 = ( h1 + 0.08 + rng() * 0.3 ) % 1;
+    nebulaPalette = {
+        a: hsvToRgb( h1, 0.55 + rng() * 0.3, 0.9 ),
+        b: hsvToRgb( h2, 0.5 + rng() * 0.35, 0.75 ),
+        seed: rng() * 20
+    };
+    renderer.setNebula( nebulaPalette.a, nebulaPalette.b, settings.nebula ? NEBULA_INTENSITY : 0, nebulaPalette.seed );
+    applySkyLight();
+}
+
 function applySkyLight() {
     if ( !renderer ) return;
     var level = SKY_AMBIENT * settings.skyLight;
-    var tint = SKY_TINT.map( function ( c ) { return c * level; } );
+    var base = SKY_TINT;
+    if ( settings.nebula && nebulaPalette ) {
+        // ambient takes on the nebula's colour, normalised to the same brightness
+        var avg = [ 0, 1, 2 ].map( function ( i ) { return ( nebulaPalette.a[ i ] + nebulaPalette.b[ i ] ) / 2; } );
+        var scale = Math.max( avg[ 0 ], avg[ 1 ], avg[ 2 ], 1e-3 );
+        base = SKY_TINT.map( function ( c, i ) { return c * 0.5 + ( avg[ i ] / scale ) * 0.5; } );
+    }
+    var tint = base.map( function ( c ) { return c * level; } );
     renderer.setSkyLight( skySH || [ 1 / 0.886227, 0, 0, 0, 0, 0, 0, 0, 0 ], tint, SKY_FLOOR );
 }
 
@@ -697,6 +1060,7 @@ function loadSystem( systemId, options ) {
             sys = data.system;
             buildBodies( data.items );
             buildSky();
+            applyNebula();
             selected = null;
             hovered = null;
             flight = null;
@@ -872,14 +1236,22 @@ function updateMovement( dt ) {
     cam.currentSpeed = v3len( cam.vel );
 }
 
-function pushOutOf( centre, minD ) {
-    var off = v3sub( cam.pos, centre );
+// keep the point cam.pos + offset at least minD from centre, by moving the camera
+function pushOutOf( centre, minD, offset ) {
+    var point = offset ? v3add( cam.pos, offset ) : cam.pos;
+    var off = v3sub( point, centre );
     var d = v3len( off );
     if ( d >= minD ) return;
     var dir = d > 0 ? v3scale( off, 1 / d ) : [ 0, 0, 1 ];
-    cam.pos = v3add( centre, v3scale( dir, minD ) );
+    cam.pos = v3add( cam.pos, v3sub( v3add( centre, v3scale( dir, minD ) ), point ) );
     var into = v3dot( cam.vel, dir );
     if ( into < 0 ) cam.vel = v3sub( cam.vel, v3scale( dir, into ) );
+}
+
+// the camera, and the ship riding ahead of it when shown
+function collide( centre, minD ) {
+    pushOutOf( centre, minD );
+    if ( settings.ship ) pushOutOf( centre, minD + SHIP_RADIUS, ship.rel );
 }
 
 function resolveCollisions() {
@@ -891,16 +1263,16 @@ function resolveCollisions() {
             var rel = v3sub( cam.pos, b.pos );
             var planar = v3sub( rel, v3scale( axis, v3dot( rel, axis ) ) );
             if ( v3len( planar ) > 1e-6 ) {
-                pushOutOf( v3add( b.pos, v3scale( v3norm( planar ), GATE_RING.major * b.radius ) ), GATE_RING.minor * b.radius + 20 );
+                collide( v3add( b.pos, v3scale( v3norm( planar ), GATE_RING.major * b.radius ) ), GATE_RING.minor * b.radius + 20 );
             }
         } else if ( b.hasSphere ) {
-            pushOutOf( b.pos, b.radius * 1.0005 + 20 );
+            collide( b.pos, b.radius * 1.0005 + 20 );
         }
         // rocks only matter once we're inside a generated field
         if ( b.field && v3len( v3sub( cam.pos, b.pos ) ) < b.field.radius * 2 ) {
             for ( var k = 0; k < b.field.rocks.length; k++ ) {
                 var rock = b.field.rocks[ k ];
-                pushOutOf( v3add( b.pos, rock.off ), rock.r * 0.85 + 20 );
+                collide( v3add( b.pos, rock.off ), rock.r * 0.85 + 20 );
             }
         }
     }
@@ -1101,7 +1473,45 @@ function writeMeshes() {
         draws.push( { mesh: meshes.rocks[ bv ], first: first, count: n - first } );
     }
 
+    if ( settings.ship ) {
+        first = n;
+        putMesh( n++, ship.rel, SHIP_RADIUS, ship.q, UNIT_STRETCH, 0, SHIP_HULL_COLOR, MESH_STYLE.SHIP );
+        draws.push( { mesh: meshes.ship, first: first, count: 1 } );
+        first = n;
+        putMesh( n++, ship.rel, SHIP_RADIUS, ship.q, UNIT_STRETCH, ship.thrust, SHIP_GLOW_COLOR, MESH_STYLE.ENGINE );
+        draws.push( { mesh: meshes.shipEngines, first: first, count: 1 } );
+    }
+
     renderer.setMeshes( meshData, n, draws );
+}
+
+function updateShip( dt ) {
+    if ( !settings.ship ) {
+        ship.prevQ = null;
+        return;
+    }
+    // camera turn rate in its own frame, from the change in orientation
+    var yawRate = 0, pitchRate = 0;
+    if ( ship.prevQ && dt > 0 ) {
+        var p = ship.prevQ;
+        var dq = qMul( [ -p[ 0 ], -p[ 1 ], -p[ 2 ], p[ 3 ] ], cam.q );
+        if ( dq[ 3 ] < 0 ) dq = dq.map( function ( c ) { return -c; } );
+        pitchRate = 2 * dq[ 0 ] / dt;
+        yawRate = 2 * dq[ 1 ] / dt;
+    }
+    ship.prevQ = cam.q.slice();
+
+    var k = 1 - Math.exp( -dt * 4 );
+    ship.bank += ( clamp( yawRate * 0.8, -0.7, 0.7 ) - ship.bank ) * k;
+    ship.pitch += ( clamp( -pitchRate * 0.25, -0.3, 0.3 ) - ship.pitch ) * k;
+    ship.slide += ( clamp( -yawRate * 0.6, -1, 1 ) * SHIP_RADIUS - ship.slide ) * k;
+
+    var throttle = Math.max( nearestSurfaceDistance() * 0.8 * cam.speedScale, 20 );
+    var target = flight ? 1 : clamp( ( cam.currentSpeed || 0 ) / throttle, 0, 1 );
+    ship.thrust += ( Math.max( target, 0.08 ) - ship.thrust ) * ( 1 - Math.exp( -dt * 3 ) );
+
+    ship.q = qNorm( qMul( cam.q, qMul( qAxis( [ 0, 0, 1 ], ship.bank ), qAxis( [ 1, 0, 0 ], ship.pitch ) ) ) );
+    ship.rel = qRot( cam.q, [ SHIP_OFFSET[ 0 ] + ship.slide, SHIP_OFFSET[ 1 ], SHIP_OFFSET[ 2 ] ] );
 }
 
 function putMarker( arr, n, rel, sizeCss, rgb, occlude, shape, alpha ) {
@@ -1115,7 +1525,7 @@ function putMarker( arr, n, rel, sizeCss, rgb, occlude, shape, alpha ) {
 }
 
 function writeMarkers() {
-    var needed = ( bodies.length + 4 ) * MARKER_FLOATS;
+    var needed = ( bodies.length + 32 ) * MARKER_FLOATS;
     if ( markerData.length < needed ) markerData = new Float32Array( needed );
     var n = 0;
     for ( var i = 0; i < bodies.length; i++ ) {
@@ -1128,6 +1538,21 @@ function writeMarkers() {
         }
         var hover = b === hovered ? 1.35 : 1;
         putMarker( markerData, n++, b.rel, b.markerPx * hover, b.markerRgb, 1, b.marker, b.markerAlpha );
+    }
+    if ( settings.ship ) {
+        // a short fading plume behind each engine: additive blobs that grow
+        // longer and brighter with thrust
+        rifter.nozzles.forEach( function ( nz ) {
+            var r = nz.radius * SHIP_RADIUS;
+            for ( var j = 0; j < 4; j++ ) {
+                var back = r * ( 0.4 + j * ( 1.2 + 2.8 * ship.thrust ) );
+                var local = v3add( v3scale( nz.pos, SHIP_RADIUS ), [ 0, 0, back ] );
+                var rel = v3add( ship.rel, qRot( ship.q, local ) );
+                var dist = Math.max( v3len( rel ), 1 );
+                var px = r * ( 2.6 - j * 0.45 ) / dist * view.pxPerRad * ( 1 + 1.5 * ship.thrust );
+                putMarker( markerData, n++, rel, px, SHIP_GLOW_COLOR, 0, SHAPE.GLOW, ( 0.3 + 0.7 * ship.thrust ) * ( 1 - j * 0.22 ) );
+            }
+        } );
     }
     renderer.setMarkers( markerData, n );
 
@@ -1344,6 +1769,7 @@ function frame( now ) {
 
     if ( flight ) updateFlight( dt );
     else updateMovement( dt );
+    updateShip( dt );
     if ( !flight ) resolveCollisions();
 
     computeView();
@@ -1695,6 +2121,8 @@ function onKeyDown( e ) {
         case 'Slash': if ( e.shiftKey ) el.helpPanel.classList.toggle( 'open' ); else { e.preventDefault(); el.treeFilter.focus(); } break;
         case 'KeyL': el.toggleLabels.checked = !el.toggleLabels.checked; syncToggles(); break;
         case 'KeyB': el.toggleOrbits.checked = !el.toggleOrbits.checked; syncToggles(); break;
+        case 'KeyV': el.toggleShip.checked = !el.toggleShip.checked; syncToggles(); break;
+        case 'KeyN': el.toggleNebula.checked = !el.toggleNebula.checked; syncToggles(); break;
     }
 }
 
@@ -1706,6 +2134,9 @@ function syncToggles() {
     settings.orbits = el.toggleOrbits.checked;
     settings.labels = el.toggleLabels.checked;
     settings.sky = el.toggleSky.checked;
+    settings.ship = el.toggleShip.checked;
+    settings.nebula = el.toggleNebula.checked;
+    applyNebula();
     buildSky();
 }
 
@@ -1793,6 +2224,10 @@ async function boot() {
         gate: renderer.createMesh( buildTorus( GATE_RING.major, GATE_RING.minor, 72, 16 ), 'stargate ring' ),
         rocks: []
     };
+    rifter = buildRifter();
+    meshes.ship = renderer.createMesh( rifter.hull, 'rifter hull' );
+    meshes.shipEngines = renderer.createMesh( rifter.engines, 'rifter engines' );
+    loadShipModel();
     for ( var rv = 0; rv < ROCK_VARIANTS; rv++ ) meshes.rocks.push( renderer.createMesh( buildRock( rv + 1 ), 'rock ' + rv ) );
 
     el.viewport.addEventListener( 'pointerdown', onPointerDown );
@@ -1809,7 +2244,7 @@ async function boot() {
         if ( id ) loadSystem( id, {} );
     } );
     el.treeFilter.addEventListener( 'input', applyTreeFilter );
-    [ el.toggleOrbits, el.toggleLabels, el.toggleSky ].forEach( function ( t ) { t.addEventListener( 'change', syncToggles ); } );
+    [ el.toggleOrbits, el.toggleLabels, el.toggleSky, el.toggleNebula, el.toggleShip ].forEach( function ( t ) { t.addEventListener( 'change', syncToggles ); } );
     el.skyLight.addEventListener( 'input', function () {
         settings.skyLight = parseFloat( el.skyLight.value );
         applySkyLight();

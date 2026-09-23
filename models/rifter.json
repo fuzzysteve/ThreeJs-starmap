@@ -1,0 +1,53 @@
+{
+ "mesh": "rifter.bin",
+ "vertices": 4140,
+ "triangles": 7956,
+ "sourceSize": [
+  94.662,
+  25.613,
+  121.536
+ ],
+ "engines": [
+  {
+   "pos": [
+    -0.0,
+    0.08951,
+    0.62717
+   ],
+   "radius": 0.03209
+  },
+  {
+   "pos": [
+    -0.21396,
+    0.02934,
+    0.61647
+   ],
+   "radius": 0.02674
+  },
+  {
+   "pos": [
+    0.21396,
+    0.02934,
+    0.61647
+   ],
+   "radius": 0.02674
+  },
+  {
+   "pos": [
+    -0.37443,
+    0.0962,
+    0.56833
+   ],
+   "radius": 0.02407
+  },
+  {
+   "pos": [
+    0.37443,
+    0.0962,
+    0.56833
+   ],
+   "radius": 0.02407
+  }
+ ],
+ "credit": "\"Eve Online - Rifter Minmatar Frigate\" by Deamos (https://www.thingiverse.com/thing:89274), CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/). Converted to the viewer mesh format, re-oriented and rescaled."
+}

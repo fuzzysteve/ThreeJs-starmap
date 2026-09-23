@@ -261,6 +261,8 @@ kbd { font: 11px monospace; border: 1px solid var(--panel-border); border-radius
     <label><input type="checkbox" id="toggleOrbits" checked> Orbits</label>
     <label><input type="checkbox" id="toggleLabels" checked> Labels</label>
     <label><input type="checkbox" id="toggleSky" checked> Sky</label>
+    <label title="Procedural nebula backdrop, coloured per region (N)"><input type="checkbox" id="toggleNebula" checked> Nebula</label>
+    <label title="Fly a Rifter (V)"><input type="checkbox" id="toggleShip"> Rifter</label>
     <label title="Ambient light from the star field on the night side of bodies">Sky light <input type="range" id="skyLight" min="0" max="3" step="0.1" value="1"></label>
     <span id="fps"></span>
     <button id="helpToggle" title="Controls (?)">?</button>
@@ -280,8 +282,11 @@ kbd { font: 11px monospace; border: 1px solid var(--panel-border); border-radius
         <tr><td><kbd>J</kbd></td><td>Jump through selected stargate</td></tr>
         <tr><td><kbd>H</kbd></td><td>System overview</td></tr>
         <tr><td><kbd>/</kbd> · <kbd>L</kbd> · <kbd>B</kbd></td><td>Filter list · labels · orbits</td></tr>
+        <tr><td><kbd>N</kbd></td><td>Nebula backdrop (procedural; colours are per region, not the game's art)</td></tr>
+        <tr><td><kbd>V</kbd></td><td>Show a Rifter to fly, at its SDE size (31 m radius)</td></tr>
         <tr><td><kbd>Esc</kbd></td><td>Stop warp / deselect</td></tr>
     </table>
+    <p>Rifter model: <a href="https://www.thingiverse.com/thing:89274" target="_blank" rel="noopener">"Eve Online - Rifter Minmatar Frigate"</a> by Deamos, licensed <a href="https://creativecommons.org/licenses/by/4.0/" target="_blank" rel="noopener">CC BY 4.0</a>; converted, re-oriented and rescaled for this viewer. EVE Online and the Rifter design are the property of CCP hf.</p>
     <p>Everything is drawn at true SDE scale. Objects too small to see are dropped; moons, stations and belts only get a marker once they separate from their parent on screen. Flight speed scales with distance to the nearest surface. Station and stargate sizes are nominal - the SDE has no radius for them (stations are drawn as dodecahedra; stargates as rings facing the system they lead to, glowing in its security colour). Asteroid belts are a single point in the SDE; the rock fields you see near them are procedurally generated, seeded per belt. Orbit rings are circles through each body's current position. The SDE has no orbital planes, so they use the same construction as the in-game map: a circle in the XZ plane rotated by the shortest arc from -X onto the parent-to-body direction.</p>
 </div>
 
